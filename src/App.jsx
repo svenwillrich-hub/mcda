@@ -158,11 +158,13 @@ export default function App() {
   const [weightMethod, setWeightMethod] = useState('direct')
   const [likertRatings, setLikertRatings] = useState({})
   const [dragCrit, setDragCrit] = useState(null)
+  const [pairAnswers, setPairAnswers] = useState({})
+  const [resetConfirm, setResetConfirm] = useState(null) // null | 'likert' | 'pairwise'
   const exRef = useRef(null)
   const sectionRefs = useRef({})
 
   // ─── Dependencies ───────────────────────────────────────────────────────────
-  const hasProblem = problem.trim().length >= 5
+  const hasProblem = title.trim().length >= 1
   const hasCriteria = criteria.length >= 1
   const hasAlternatives = alternatives.length >= 1
   const scoringComplete = useMemo(() => {
@@ -241,7 +243,64 @@ export default function App() {
     setCriteria(p => p.map(c => ({ ...c, weight: total > 0 ? Math.round(((nr[c.id] || 1) / total) * 100) : 0 })))
   }
   const directFromWeights = useMemo(() => { const o = {}; criteria.forEach(c => { o[c.id] = c.weight }); return o }, [criteria])
-  const likertFromWeights = useMemo(() => { const mx = Math.max(...criteria.map(c => c.weight), 1); const o = {}; criteria.forEach(c => { o[c.id] = Math.max(1, Math.min(6, Math.round((c.weight / mx) * 6))) }); return o }, [criteria])
+
+  // Pairwise comparison pairs + AHP logic
+  const pairPairs = useMemo(() => {
+    const pairs = []
+    for (let i = 0; i < criteria.length; i++) {
+      for (let j = i + 1; j < criteria.length; j++) {
+        pairs.push({ a: criteria[i], b: criteria[j] })
+      }
+    }
+    return pairs
+  }, [criteria])
+
+  const applyPairwiseWeights = (answers) => {
+    const n = criteria.length
+    if (n < 2) return
+    // Build AHP matrix
+    const matrix = Array.from({ length: n }, () => Array(n).fill(1))
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        const key = `${criteria[i].id}_${criteria[j].id}`
+        const ans = answers[key] // positive = i preferred, negative = j preferred
+        const val = ans || 1
+        matrix[i][j] = val > 0 ? val : 1 / Math.abs(val)
+        matrix[j][i] = 1 / matrix[i][j]
+      }
+    }
+    // Compute eigenvector approximation (column normalization)
+    const colSums = Array(n).fill(0)
+    for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) colSums[j] += matrix[i][j]
+    const weights = Array(n).fill(0)
+    for (let i = 0; i < n; i++) {
+      for (let j = 0; j < n; j++) weights[i] += matrix[i][j] / (colSums[j] || 1)
+      weights[i] /= n
+    }
+    setCriteria(prev => prev.map((c, i) => ({ ...c, weight: Math.round(weights[i] * 100) })))
+  }
+
+  const handleMethodSwitch = (newMethod) => {
+    if (newMethod === 'direct') {
+      setWeightMethod('direct')
+      setResetConfirm(null)
+      return
+    }
+    // For likert & pairwise: warn that weights will be reset
+    if (newMethod === 'likert' || newMethod === 'pairwise') {
+      if (totalWeight > 0) {
+        setResetConfirm(newMethod)
+        return
+      }
+    }
+    confirmMethodSwitch(newMethod)
+  }
+  const confirmMethodSwitch = (method) => {
+    setWeightMethod(method)
+    setResetConfirm(null)
+    if (method === 'pairwise') { setPairAnswers({}); applyPairwiseWeights({}) }
+    if (method === 'likert') { setLikertRatings({}) }
+  }
 
   // ─── Alternatives ───────────────────────────────────────────────────────────
   const addAlternative = () => setAlternatives(p => [...p, { id: uid('a'), name: '', description: '' }])
@@ -348,16 +407,8 @@ export default function App() {
                             value={title} onChange={e => setTitle(e.target.value)}
                           />
                         </div>
-                        <div>
-                          <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide mb-1 block">Description</label>
-                          <textarea
-                            className="w-full border border-slate-200 rounded-xl p-3.5 text-sm bg-white resize-y min-h-[70px] focus:outline-none focus:ring-2 focus:ring-primary/25 focus:border-primary/40 transition placeholder:text-slate-300"
-                            placeholder="What are you trying to decide? (min. 5 characters to unlock next steps)"
-                            value={problem} onChange={e => setProblem(e.target.value)}
-                          />
-                        </div>
-                        {problem.length > 0 && problem.trim().length < 5 && (
-                          <p className="text-[11px] text-amber-500">Keep typing — need 5+ characters to unlock.</p>
+                        {title.length > 0 && title.trim().length < 1 && (
+                          <p className="text-[11px] text-amber-500">Enter a title to unlock next steps.</p>
                         )}
                       </div>
                     )}
@@ -387,76 +438,189 @@ export default function App() {
                     {sec.id === 'weights' && (
                       <div className="space-y-4">
                         <p className="text-[11px] text-slate-400">Relative importance — auto-normalized to 100%.</p>
+
+                        {/* Toggle method panel */}
                         <button onClick={() => setWeightMethodOpen(!weightMethodOpen)}
                           className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition ${weightMethodOpen ? 'bg-primary text-white' : 'bg-primary/10 text-primary hover:bg-primary/15'}`}>
                           <Sliders size={13} /> {weightMethodOpen ? 'Close Method Panel' : 'Open Method Panel'}
                           <ChevronRight size={12} className={`transition-transform duration-200 ${weightMethodOpen ? 'rotate-90' : ''}`} />
                         </button>
 
-                        <div className={`flex gap-5 ${weightMethodOpen ? 'flex-col lg:flex-row' : ''}`}>
-                          {weightMethodOpen && (
-                            <div className="lg:w-[45%] bg-slate-50 rounded-xl p-4 border border-slate-200 space-y-3">
-                              <div className="flex gap-1">
-                                {['direct', 'likert'].map(m => (
-                                  <button key={m} onClick={() => setWeightMethod(m)}
-                                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${weightMethod === m ? 'bg-primary text-white' : 'bg-white text-slate-500 hover:bg-slate-100 border border-slate-200'}`}>
-                                    {m === 'direct' ? 'Direct Rating' : 'Likert Scale'}
-                                  </button>
-                                ))}
-                              </div>
-                              {weightMethod === 'direct' ? (
-                                <div className="space-y-2">
-                                  <p className="text-[10px] text-slate-400">Rate 0–100. Updates live →</p>
-                                  {criteria.map(c => (
-                                    <div key={c.id} className="flex items-center gap-2">
-                                      <span className="text-[11px] w-28 truncate font-medium text-slate-700">{c.name || '—'}</span>
-                                      <input type="range" min="0" max="100" value={directFromWeights[c.id] || 0} onChange={e => setWeightDirect(c.id, parseInt(e.target.value))} className="flex-1 accent-primary h-1.5" />
-                                      <input type="number" min="0" max="100" value={directFromWeights[c.id] || 0} onChange={e => setWeightDirect(c.id, Math.max(0, parseInt(e.target.value) || 0))} className="w-11 border border-slate-200 rounded-md px-1 py-0.5 text-[11px] font-mono text-center focus:outline-none focus:ring-1 focus:ring-primary/25" />
-                                    </div>
-                                  ))}
-                                </div>
-                              ) : (
-                                <div className="space-y-2.5">
-                                  <p className="text-[10px] text-slate-400">Rate 1–6. Updates live →</p>
-                                  {criteria.map(c => {
-                                    const cur = likertRatings[c.id] || likertFromWeights[c.id] || 3
-                                    return (
-                                      <div key={c.id}>
-                                        <span className="text-[11px] font-medium text-slate-700">{c.name || '—'}</span>
-                                        <div className="flex gap-0.5 mt-1">
-                                          {LIKERT.map(l => (
-                                            <button key={l.value} onClick={() => setLikertRating(c.id, l.value)} title={l.label}
-                                              className={`flex-1 py-1 rounded-md text-[10px] font-bold transition border ${cur === l.value ? 'border-primary bg-primary text-white' : 'border-slate-200 bg-white text-slate-400 hover:bg-slate-50'}`}>
-                                              {l.value}
-                                            </button>
-                                          ))}
-                                        </div>
-                                      </div>
-                                    )
-                                  })}
-                                </div>
-                              )}
+                        {/* Reset confirmation dialog */}
+                        {resetConfirm && (
+                          <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 space-y-2">
+                            <div className="text-sm font-semibold text-amber-800">Reset current weights?</div>
+                            <p className="text-xs text-amber-700">
+                              {resetConfirm === 'likert'
+                                ? 'The Likert scale uses discrete 1–6 ratings which cannot precisely represent arbitrary continuous weight values. Switching will reset your current weights and start fresh from the Likert inputs.'
+                                : 'Pairwise comparison derives weights from relative preference judgments. This process starts from scratch and will overwrite your current weights with the computed result.'}
+                            </p>
+                            <div className="flex gap-2 pt-1">
+                              <button onClick={() => setResetConfirm(null)} className="px-3 py-1.5 text-xs font-semibold text-slate-600 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 transition">Cancel</button>
+                              <button onClick={() => confirmMethodSwitch(resetConfirm)} className="px-3 py-1.5 text-xs font-semibold text-white bg-amber-500 rounded-lg hover:bg-amber-600 transition">Reset & Continue</button>
                             </div>
-                          )}
-                          <div className={weightMethodOpen ? 'lg:w-[55%]' : 'w-full'}>
-                            <div className="flex items-center gap-2 mb-2">
-                              <span className={`text-[11px] font-mono font-bold ${totalWeight > 0 ? 'text-slate-500' : 'text-slate-300'}`}>Σ = {totalWeight} → normalized to 100%</span>
-                            </div>
-                            <div className="space-y-1.5">
-                              {normalizedWeights.map(c => (
-                                <div key={c.id} className="flex items-center gap-2">
-                                  <span className="text-[11px] w-28 truncate font-medium text-slate-700">{c.name || '—'}</span>
-                                  <div className="flex-1 bg-slate-100 rounded-full h-[18px] overflow-hidden relative">
-                                    <div className="h-full bg-primary/70 rounded-full transition-all duration-300 ease-out" style={{ width: `${c.pct}%` }} />
-                                    {c.pct > 5 && <span className="absolute inset-0 flex items-center justify-center text-[10px] font-bold text-white drop-shadow-sm">{c.pct.toFixed(1)}%</span>}
-                                  </div>
-                                  {!weightMethodOpen && (
-                                    <input type="number" min="0" max="999" value={c.weight} onChange={e => updateCriterion(c.id, 'weight', Math.max(0, parseInt(e.target.value) || 0))} className="w-11 border border-slate-200 rounded-md px-1 py-0.5 text-[11px] font-mono text-center focus:outline-none focus:ring-1 focus:ring-primary/25" />
-                                  )}
-                                  {weightMethodOpen && <span className="text-[11px] font-mono text-slate-400 w-11 text-right">{c.pct.toFixed(0)}%</span>}
-                                </div>
+                          </div>
+                        )}
+
+                        {/* Method panel (above the bars) */}
+                        {weightMethodOpen && !resetConfirm && (
+                          <div className="bg-slate-50 rounded-xl p-4 border border-slate-200 space-y-3">
+                            <div className="flex gap-1">
+                              {[
+                                { id: 'direct', label: 'Direct Rating' },
+                                { id: 'likert', label: 'Likert Scale' },
+                                { id: 'pairwise', label: 'Pairwise Comparison' },
+                              ].map(m => (
+                                <button key={m.id} onClick={() => handleMethodSwitch(m.id)}
+                                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${weightMethod === m.id ? 'bg-primary text-white' : 'bg-white text-slate-500 hover:bg-slate-100 border border-slate-200'}`}>
+                                  {m.label}
+                                </button>
                               ))}
                             </div>
+
+                            {/* Direct Rating */}
+                            {weightMethod === 'direct' && (
+                              <div className="space-y-2">
+                                <p className="text-[10px] text-slate-400">Rate each criterion 0–100. Weights update live below.</p>
+                                {criteria.map(c => (
+                                  <div key={c.id} className="flex items-center gap-2">
+                                    <span className="text-[11px] w-32 truncate font-medium text-slate-700">{c.name || '—'}</span>
+                                    <input type="range" min="0" max="100" value={directFromWeights[c.id] || 0} onChange={e => setWeightDirect(c.id, parseInt(e.target.value))} className="flex-1 accent-primary h-1.5" />
+                                    <input type="number" min="0" max="100" value={directFromWeights[c.id] || 0} onChange={e => setWeightDirect(c.id, Math.max(0, parseInt(e.target.value) || 0))} className="w-12 border border-slate-200 rounded-md px-1 py-0.5 text-[11px] font-mono text-center focus:outline-none focus:ring-1 focus:ring-primary/25" />
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+
+                            {/* Likert Scale */}
+                            {weightMethod === 'likert' && (
+                              <div className="space-y-2.5">
+                                <p className="text-[10px] text-slate-400">Rate each criterion's importance 1–6. Weights update live below.</p>
+                                {criteria.map(c => {
+                                  const cur = likertRatings[c.id] || 3
+                                  return (
+                                    <div key={c.id}>
+                                      <span className="text-[11px] font-medium text-slate-700">{c.name || '—'}</span>
+                                      <div className="flex gap-0.5 mt-1">
+                                        {LIKERT.map(l => (
+                                          <button key={l.value} onClick={() => setLikertRating(c.id, l.value)} title={l.label}
+                                            className={`flex-1 py-1.5 rounded-md text-[10px] font-bold transition border ${cur === l.value ? 'border-primary bg-primary text-white' : 'border-slate-200 bg-white text-slate-400 hover:bg-slate-50'}`}>
+                                            {l.value}
+                                          </button>
+                                        ))}
+                                      </div>
+                                      <div className="flex justify-between text-[9px] text-slate-300 mt-0.5 px-0.5"><span>Not important</span><span>Critical</span></div>
+                                    </div>
+                                  )
+                                })}
+                              </div>
+                            )}
+
+                            {/* Pairwise Comparison — full list view */}
+                            {weightMethod === 'pairwise' && (
+                              <div className="space-y-3">
+                                {pairPairs.length === 0 ? (
+                                  <p className="text-xs text-slate-400 italic">Need at least 2 criteria for pairwise comparison.</p>
+                                ) : (
+                                  <>
+                                    <p className="text-[10px] text-slate-400">
+                                      Compare each pair — which criterion is more important? Default is <strong>1 (equal)</strong>.
+                                      {Object.keys(pairAnswers).length < pairPairs.length && <span className="text-amber-500 font-medium"> Highlighted pairs still at default.</span>}
+                                    </p>
+
+                                    {/* Progress */}
+                                    <div className="flex items-center gap-2">
+                                      <div className="flex-1 bg-slate-200 rounded-full h-1.5 overflow-hidden">
+                                        <div className="h-full bg-primary rounded-full transition-all duration-300" style={{ width: `${(Object.keys(pairAnswers).length / pairPairs.length) * 100}%` }} />
+                                      </div>
+                                      <span className="text-[10px] font-mono text-slate-400">{Object.keys(pairAnswers).length} / {pairPairs.length} rated</span>
+                                    </div>
+
+                                    {/* All pairs list */}
+                                    <div className="space-y-2 max-h-[480px] overflow-y-auto pr-1">
+                                      {pairPairs.map((pair, idx) => {
+                                        const key = `${pair.a.id}_${pair.b.id}`
+                                        const answered = key in pairAnswers
+                                        const currentVal = pairAnswers[key] ?? 1
+                                        const scaleValues = [9, 7, 5, 3, 1, -3, -5, -7, -9]
+                                        return (
+                                          <div key={key} className={`rounded-xl p-3 border transition-all ${answered ? 'bg-white border-slate-200' : 'bg-amber-50/50 border-amber-200/70 ring-1 ring-amber-100'}`}>
+                                            <div className="flex items-center gap-2 mb-2">
+                                              <span className="text-[10px] font-mono text-slate-300 w-4 text-right shrink-0">{idx + 1}.</span>
+                                              <span className="text-[11px] font-bold text-primary flex-1 truncate">{pair.a.name || '—'}</span>
+                                              <span className="text-[10px] text-slate-300 font-medium shrink-0">vs</span>
+                                              <span className="text-[11px] font-bold text-secondary flex-1 truncate text-right">{pair.b.name || '—'}</span>
+                                            </div>
+                                            <div className="flex items-center gap-0.5">
+                                              <span className="text-[8px] text-primary w-4 text-center shrink-0 font-bold">◀</span>
+                                              {scaleValues.map(val => {
+                                                const isSelected = currentVal === val
+                                                const isCenter = val === 1
+                                                const isLeft = val > 1
+                                                return (
+                                                  <button key={val}
+                                                    onClick={() => {
+                                                      const newAnswers = { ...pairAnswers, [key]: val }
+                                                      setPairAnswers(newAnswers)
+                                                      applyPairwiseWeights(newAnswers)
+                                                    }}
+                                                    title={`${Math.abs(val)} — ${val === 1 ? 'Equal' : val > 0 ? pair.a.name + ' preferred' : pair.b.name + ' preferred'}`}
+                                                    className={`flex-1 py-1.5 rounded text-[10px] font-bold transition border ${
+                                                      isSelected
+                                                        ? isCenter ? 'border-slate-600 bg-slate-600 text-white shadow-sm'
+                                                          : isLeft ? 'border-primary bg-primary text-white shadow-sm'
+                                                          : 'border-secondary bg-secondary text-white shadow-sm'
+                                                        : 'border-slate-200 bg-white text-slate-400 hover:bg-slate-50'
+                                                    }`}
+                                                  >
+                                                    {Math.abs(val)}
+                                                  </button>
+                                                )
+                                              })}
+                                              <span className="text-[8px] text-secondary w-4 text-center shrink-0 font-bold">▶</span>
+                                            </div>
+                                          </div>
+                                        )
+                                      })}
+                                    </div>
+
+                                    {Object.keys(pairAnswers).length === pairPairs.length && (
+                                      <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-2 text-xs text-emerald-700 font-semibold flex items-center gap-1.5">
+                                        <span>✓</span> All {pairPairs.length} pairs rated — AHP eigenvector weights applied.
+                                      </div>
+                                    )}
+
+                                    <button onClick={() => { setPairAnswers({}); applyPairwiseWeights({}) }} className="text-[10px] text-slate-400 hover:text-red-500 font-medium transition">
+                                      Reset all pairs
+                                    </button>
+                                  </>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        {/* Weight bars — always below */}
+                        <div>
+                          <div className="flex items-center gap-2 mb-2">
+                            <span className={`text-[11px] font-mono font-bold ${totalWeight > 0 ? 'text-slate-500' : 'text-slate-300'}`}>Σ = {totalWeight} → normalized to 100%</span>
+                          </div>
+                          <div className="space-y-1.5">
+                            {normalizedWeights.map(c => (
+                              <div key={c.id} className="flex items-center gap-2">
+                                <span className="text-[11px] w-32 truncate font-medium text-slate-700">{c.name || '—'}</span>
+                                <div className="flex-1 bg-slate-100 rounded-full h-[18px] overflow-hidden relative">
+                                  <div className="h-full bg-primary/70 rounded-full transition-all duration-300 ease-out" style={{ width: `${c.pct}%` }} />
+                                  {c.pct > 5 && <span className="absolute inset-0 flex items-center justify-center text-[10px] font-bold text-white drop-shadow-sm">{c.pct.toFixed(1)}%</span>}
+                                </div>
+                                {(!weightMethodOpen || weightMethod === 'direct') && (
+                                  <input type="number" min="0" max="999" value={c.weight} onChange={e => updateCriterion(c.id, 'weight', Math.max(0, parseInt(e.target.value) || 0))} className="w-12 border border-slate-200 rounded-md px-1 py-0.5 text-[11px] font-mono text-center focus:outline-none focus:ring-1 focus:ring-primary/25" />
+                                )}
+                                {weightMethodOpen && weightMethod !== 'direct' && (
+                                  <span className="text-[11px] font-mono text-slate-400 w-12 text-right">{c.pct.toFixed(0)}%</span>
+                                )}
+                              </div>
+                            ))}
                           </div>
                         </div>
                       </div>
