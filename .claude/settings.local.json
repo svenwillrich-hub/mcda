@@ -18,7 +18,11 @@
       "Bash(docker compose up --build -d)",
       "Bash(docker exec mcda-app cat /app/vite.config.js)",
       "Bash(docker exec mcda-app sh -c \"cat /app/vite.config.js\")",
-      "Bash(docker compose up -d)"
+      "Bash(docker compose up -d)",
+      "Bash(npm run build)",
+      "Bash(npx vite build)",
+      "Bash(npm install)",
+      "mcp__Claude_Preview__preview_start"
     ]
   }
 }

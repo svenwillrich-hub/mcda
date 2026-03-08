@@ -1,12 +1,13 @@
 import React, { useState, useMemo, useRef, useEffect } from 'react'
 import {
-  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, LabelList,
   LineChart, Line, Cell, ReferenceLine
 } from 'recharts'
 import {
   Plus, Trash2, Upload, Download, ChevronDown, Trophy, Info, X,
   TrendingUp, TrendingDown, Zap, Target, GripVertical,
-  ChevronRight, ChevronUp, Sliders, Lock, Minus, Shuffle
+  ChevronRight, ChevronUp, Sliders, Lock, Minus, Shuffle,
+  Eye, EyeOff, BookOpen, BarChart3, Shield, Sparkles
 } from 'lucide-react'
 
 // ─── Constants ──────────────────────────────────────────────────────────────────
@@ -290,6 +291,9 @@ export default function App() {
   const [mcSimCount, setMcSimCount] = useState(2000)
   const [mcRunning, setMcRunning] = useState(false)
   const mcAbortRef = useRef(false)
+  const [showPartWorths, setShowPartWorths] = useState(false)
+  const [expandedDualPairs, setExpandedDualPairs] = useState({})
+  const [showAbout, setShowAbout] = useState(false)
   const exRef = useRef(null)
   const sectionRefs = useRef({})
 
@@ -597,6 +601,30 @@ export default function App() {
   return (
     <div className="min-h-screen bg-gradient-to-b from-slate-50 via-white to-slate-50">
 
+      {/* ━━━ Hero Branding ━━━ */}
+      <div className="relative overflow-hidden bg-gradient-to-br from-[#1e293b] via-[#334155] to-[#1e293b]">
+        <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top_right,rgba(79,110,247,0.25),transparent_50%)]" />
+        <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_bottom_left,rgba(0,180,180,0.15),transparent_50%)]" />
+        <div className="absolute top-0 left-0 w-full h-px bg-gradient-to-r from-transparent via-primary/50 to-transparent" />
+        <div className="max-w-5xl mx-auto px-4 py-6 relative">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-4">
+              <div className="w-12 h-12 bg-white/10 rounded-2xl flex items-center justify-center backdrop-blur-sm border border-white/10 shadow-lg shadow-primary/10">
+                <BarChart3 size={24} className="text-white" />
+              </div>
+              <div>
+                <h1><a href="/mcda/" className="text-xl sm:text-2xl font-bold text-white tracking-tight hover:text-white/80 transition-colors no-underline">Multi-Criteria Decision Analysis</a></h1>
+                <p className="text-white/50 text-xs sm:text-sm mt-0.5">Structured decision-making with quantitative sensitivity analysis</p>
+              </div>
+            </div>
+            <button onClick={() => setShowAbout(true)} className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-white/70 hover:text-white border border-white/10 hover:border-white/25 hover:bg-white/5 transition backdrop-blur-sm">
+              <BookOpen size={13} /> About
+            </button>
+          </div>
+        </div>
+        <div className="absolute bottom-0 left-0 w-full h-px bg-gradient-to-r from-transparent via-secondary/30 to-transparent" />
+      </div>
+
       {/* ━━━ Sticky Header ━━━ */}
       <header className="sticky top-0 z-50 bg-white/95 backdrop-blur-md border-b border-slate-200/80 shadow-sm">
         <div className="max-w-5xl mx-auto px-4">
@@ -613,6 +641,7 @@ export default function App() {
               <input ref={fileRef} type="file" accept=".json" onChange={importJSON} className="hidden" />
               <button onClick={() => fileRef.current?.click()} className="px-2 py-1 text-[11px] text-slate-500 hover:text-slate-700 border border-slate-200 rounded-md hover:bg-slate-50 transition flex items-center gap-1"><Upload size={11} /> Import</button>
               <button onClick={exportJSON} className="px-2 py-1 text-[11px] text-slate-500 hover:text-slate-700 border border-slate-200 rounded-md hover:bg-slate-50 transition flex items-center gap-1"><Download size={11} /> Export</button>
+              <button onClick={() => setShowAbout(true)} className="px-2 py-1 text-[11px] text-primary hover:text-primary/80 border border-primary/20 rounded-md hover:bg-primary/5 transition flex items-center gap-1 sm:hidden"><BookOpen size={11} /></button>
               <div className="relative" ref={exRef}>
                 <button onClick={() => setExampleOpen(!exampleOpen)} className="px-2 py-1 text-[11px] text-slate-500 hover:text-slate-700 border border-slate-200 rounded-md hover:bg-slate-50 transition flex items-center gap-1">Examples <ChevronDown size={11} /></button>
                 {exampleOpen && (
@@ -1095,9 +1124,18 @@ export default function App() {
                           </div>
                         )}
 
-                        {/* Combined stacked bar chart (replaces separate bar + decomposition) */}
+                        {/* Combined stacked bar chart */}
                         <div className="bg-slate-50 rounded-xl p-4">
-                          <h4 className="text-xs font-semibold text-slate-600 mb-3">Utility Breakdown by Criterion</h4>
+                          <div className="flex items-center justify-between mb-3">
+                            <h4 className="text-xs font-semibold text-slate-600">Utility Breakdown by Criterion</h4>
+                            <button
+                              onClick={() => setShowPartWorths(!showPartWorths)}
+                              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[10px] font-semibold transition ${showPartWorths ? 'bg-primary text-white' : 'bg-white text-slate-500 border border-slate-200 hover:bg-slate-100'}`}
+                            >
+                              {showPartWorths ? <EyeOff size={11} /> : <Eye size={11} />}
+                              {showPartWorths ? 'Hide' : 'Show'} Part-Worth Details
+                            </button>
+                          </div>
                           <ResponsiveContainer width="100%" height={Math.max(160, mcda.ranking.length * 50)}>
                             <BarChart
                               data={mcda.ranking.map(r => {
@@ -1105,58 +1143,75 @@ export default function App() {
                                 criteria.forEach(c => { d[c.name] = Math.round((r.partWorths[c.id] || 0) * 1000) / 10 })
                                 return d
                               })}
-                              layout="vertical" margin={{ left: 100, right: 50 }}
+                              layout="vertical" margin={{ left: 100, right: 55 }}
                             >
                               <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
                               <XAxis type="number" domain={[0, 100]} tick={{ fontSize: 10 }} tickFormatter={v => `${v}%`} />
                               <YAxis type="category" dataKey="name" tick={{ fontSize: 12, fontWeight: 600 }} width={100} />
-                              <Tooltip formatter={v => `${v}%`} />
                               <Legend wrapperStyle={{ fontSize: 11 }} />
-                              {criteria.map((c, i) => <Bar key={c.id} dataKey={c.name} stackId="a" fill={ALT_COLORS[i % ALT_COLORS.length]} radius={i === criteria.length - 1 ? [0, 4, 4, 0] : undefined} />)}
+                              {criteria.map((c, i) => (
+                                <Bar key={c.id} dataKey={c.name} stackId="a" fill={ALT_COLORS[i % ALT_COLORS.length]} radius={i === criteria.length - 1 ? [0, 4, 4, 0] : undefined}>
+                                  {i === criteria.length - 1 && (
+                                    <LabelList
+                                      dataKey="_total"
+                                      position="right"
+                                      formatter={v => `${v}%`}
+                                      style={{ fontSize: 10, fontWeight: 700, fill: '#475569' }}
+                                    />
+                                  )}
+                                </Bar>
+                              ))}
                             </BarChart>
                           </ResponsiveContainer>
                         </div>
 
-                        {/* Ranking detail table with part-worths inline */}
-                        <div className="overflow-x-auto">
-                          <table className="w-full text-xs border-collapse">
-                            <thead>
-                              <tr className="border-b-2 border-slate-200">
-                                <th className="text-left py-2 px-2 w-6 text-slate-400">#</th>
-                                <th className="text-left py-2 px-2 text-slate-700">Alternative</th>
-                                {criteria.map(c => (
-                                  <th key={c.id} className="text-center py-2 px-1 text-[10px] text-slate-400 font-medium">
-                                    <div className="truncate max-w-[70px] mx-auto" title={c.name}>{c.name}</div>
-                                    <div className="text-[9px] text-slate-300 font-normal">{normalizedWeights.find(w => w.id === c.id)?.pct.toFixed(0)}%</div>
-                                  </th>
-                                ))}
-                                <th className="text-right py-2 px-2 text-slate-700 font-bold">Total</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {mcda.ranking.map((r, i) => (
-                                <tr key={r.id} className="border-b border-slate-100 hover:bg-slate-50/50 transition">
-                                  <td className="py-2.5 px-2">
-                                    <span className={`inline-flex w-5 h-5 rounded-full items-center justify-center text-[10px] font-bold ${i < 3 ? 'text-white' : 'bg-slate-200 text-slate-500'}`} style={i < 3 ? { backgroundColor: RANK_COLORS[i] } : {}}>{i + 1}</span>
-                                  </td>
-                                  <td className="py-2.5 px-2 font-semibold text-sm text-slate-800">{r.name}</td>
-                                  {criteria.map(c => {
-                                    const pw = r.partWorths[c.id] || 0
-                                    return (
-                                      <td key={c.id} className="py-2.5 px-1 text-center">
-                                        <span className="font-mono text-[11px] text-slate-600">{(pw * 100).toFixed(1)}</span>
-                                      </td>
-                                    )
-                                  })}
-                                  <td className="py-2.5 px-2 text-right"><span className="font-mono font-bold text-primary text-sm">{(r.utility * 100).toFixed(1)}%</span></td>
+                        {/* Part-worth detail table (toggleable) */}
+                        {showPartWorths && (
+                          <div className="overflow-x-auto animate-in slide-in-from-top-2">
+                            <table className="w-full text-xs border-collapse">
+                              <thead>
+                                <tr className="border-b-2 border-slate-200">
+                                  <th className="text-left py-2 px-2 w-6 text-slate-400">#</th>
+                                  <th className="text-left py-2 px-2 text-slate-700">Alternative</th>
+                                  {criteria.map((c, ci) => (
+                                    <th key={c.id} className="text-center py-2 px-1 text-[10px] text-slate-400 font-medium">
+                                      <div className="flex items-center justify-center gap-1">
+                                        <span className="w-2 h-2 rounded-sm inline-block" style={{ backgroundColor: ALT_COLORS[ci % ALT_COLORS.length] }} />
+                                        <span className="truncate max-w-[70px]" title={c.name}>{c.name}</span>
+                                      </div>
+                                      <div className="text-[9px] text-slate-300 font-normal mt-0.5">{normalizedWeights.find(w => w.id === c.id)?.pct.toFixed(0)}% weight</div>
+                                    </th>
+                                  ))}
+                                  <th className="text-right py-2 px-2 text-slate-700 font-bold">Total</th>
                                 </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
+                              </thead>
+                              <tbody>
+                                {mcda.ranking.map((r, i) => (
+                                  <tr key={r.id} className={`border-b border-slate-100 transition ${i === 0 ? 'bg-primary/[0.03]' : 'hover:bg-slate-50/50'}`}>
+                                    <td className="py-2.5 px-2">
+                                      <span className={`inline-flex w-5 h-5 rounded-full items-center justify-center text-[10px] font-bold ${i < 3 ? 'text-white' : 'bg-slate-200 text-slate-500'}`} style={i < 3 ? { backgroundColor: RANK_COLORS[i] } : {}}>{i + 1}</span>
+                                    </td>
+                                    <td className="py-2.5 px-2 font-semibold text-sm text-slate-800">{r.name}</td>
+                                    {criteria.map(c => {
+                                      const pw = r.partWorths[c.id] || 0
+                                      const maxPw = Math.max(...mcda.ranking.map(x => x.partWorths[c.id] || 0))
+                                      const isMax = pw === maxPw && pw > 0
+                                      return (
+                                        <td key={c.id} className="py-2.5 px-1 text-center">
+                                          <span className={`font-mono text-[11px] ${isMax ? 'text-primary font-bold' : 'text-slate-500'}`}>{(pw * 100).toFixed(1)}</span>
+                                        </td>
+                                      )
+                                    })}
+                                    <td className="py-2.5 px-2 text-right"><span className="font-mono font-bold text-primary text-sm">{(r.utility * 100).toFixed(1)}%</span></td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
 
                         <div className="bg-blue-50 border border-blue-100 rounded-lg p-2 text-[10px] text-blue-600 flex items-start gap-1.5">
-                          <Info size={11} className="shrink-0 mt-0.5" /><span><strong>Method:</strong> Min-max normalization [0,1]. Utility = Σ(norm × weight). Part-worth = each criterion's utility contribution.</span>
+                          <Info size={11} className="shrink-0 mt-0.5" /><span><strong>Method:</strong> Min-max normalization [0,1]. Utility = Σ(norm × weight). Part-worth = each criterion's weighted utility contribution.</span>
                         </div>
                       </div>
                     )}
@@ -1241,67 +1296,147 @@ export default function App() {
                           </div>
                         )}
 
-                        {/* ══ TAB 2: Dual Criteria — all pairs ══ */}
+                        {/* ══ TAB 2: Dual Criteria — all pairs (collapsible table) ══ */}
                         {analysisTab === 'dual' && (
                           <div className="space-y-4">
-                            <p className="text-[11px] text-slate-400">Sweeps <strong>every pair of criteria</strong> simultaneously across all valid weight combinations (step: {sensStep}%). Sorted by robustness — <strong>least robust pair first</strong>.</p>
-                            <button onClick={runAllDualSweeps} disabled={criteria.length < 2}
+                            <p className="text-[11px] text-slate-400">Sweeps <strong>every pair of criteria</strong> simultaneously across all valid weight combinations (step: {sensStep}%). Sorted by robustness — <strong>critical pairs first</strong>.</p>
+                            <button onClick={() => { runAllDualSweeps(); setExpandedDualPairs({}) }} disabled={criteria.length < 2}
                               className="flex items-center gap-2 px-4 py-2 bg-primary text-white rounded-lg text-xs font-semibold hover:bg-primary/90 transition shadow-sm disabled:opacity-40 disabled:cursor-not-allowed">
                               <Target size={14} /> Run All Pairs ({criteria.length >= 2 ? criteria.length * (criteria.length - 1) / 2 : 0} combinations)
                             </button>
 
                             {dualResults && dualResults.length > 0 && (
-                              <div className="space-y-5">
-                                {dualResults.map((dr, di) => (
-                                  <div key={di} className={`rounded-xl p-4 border space-y-3 ${parseFloat(dr.baseWinPct) < 60 ? 'bg-amber-50/50 border-amber-200' : 'bg-slate-50 border-slate-200'}`}>
-                                    <div className="flex items-center justify-between flex-wrap gap-2">
-                                      <h5 className="text-xs font-bold text-slate-800">{dr.crit1.name} × {dr.crit2.name}</h5>
-                                      <div className="flex items-center gap-2">
-                                        <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full font-bold ${
-                                          parseFloat(dr.baseWinPct) >= 80 ? 'bg-emerald-100 text-emerald-700' :
-                                          parseFloat(dr.baseWinPct) >= 50 ? 'bg-amber-100 text-amber-700' :
-                                          'bg-red-100 text-red-700'
-                                        }`}>{dr.baseWinner} {dr.baseWinPct}%</span>
-                                        {parseFloat(dr.flipPct) > 0 && <span className="text-[10px] font-mono text-red-500">⚠ {dr.flipPct}% flips</span>}
-                                      </div>
-                                    </div>
-                                    {/* Mini heatmap */}
-                                    <div className="flex gap-2">
-                                      <div>
-                                        <div style={{ display: 'grid', gridTemplateColumns: `repeat(${dr.steps}, minmax(8px, 14px))`, gap: '1px' }}>
-                                          {Array.from({ length: dr.steps }).reverse().map((_, ryi) => {
-                                            const w2 = (dr.steps - 1 - ryi) * dr.step
-                                            return Array.from({ length: dr.steps }).map((_, xi) => {
-                                              const w1 = xi * dr.step
-                                              const cell = dr.grid.find(g => g.w1 === w1 && g.w2 === w2)
-                                              if (!cell || !cell.winnerId) return <div key={`${w1}_${w2}`} className="aspect-square rounded-[1px] bg-slate-200/50" />
-                                              const altIdx = alternatives.findIndex(a => a.id === cell.winnerId)
-                                              const isCurrent = Math.abs(w1 - dr.currentW1) < dr.step && Math.abs(w2 - dr.currentW2) < dr.step
-                                              return <div key={`${w1}_${w2}`} className={`aspect-square rounded-[1px] ${isCurrent ? 'ring-1 ring-slate-800 z-10' : ''}`} style={{ backgroundColor: ALT_COLORS[altIdx % ALT_COLORS.length] }} title={`${dr.crit1.name}: ${w1}% / ${dr.crit2.name}: ${w2}% → ${cell.winnerName}`} />
-                                            })
-                                          })}
-                                        </div>
-                                        <div className="text-[8px] text-slate-400 text-center mt-0.5">{dr.crit1.name}</div>
-                                      </div>
-                                      <div className="flex items-center">
-                                        <span className="text-[8px] text-slate-400" style={{ writingMode: 'vertical-rl', transform: 'rotate(180deg)' }}>{dr.crit2.name}</span>
-                                      </div>
-                                      <div className="flex-1 space-y-1 min-w-0">
-                                        {dr.winFrequency.filter(w => w.count > 0).map(w => (
-                                          <div key={w.id} className="flex items-center gap-1.5">
-                                            <div className="w-2.5 h-2.5 rounded-sm shrink-0" style={{ backgroundColor: ALT_COLORS[alternatives.findIndex(a => a.id === w.id) % ALT_COLORS.length] }} />
-                                            <span className="text-[10px] font-medium text-slate-700 truncate">{w.name}</span>
-                                            <span className="text-[10px] font-mono text-slate-400 ml-auto shrink-0">{w.pct.toFixed(1)}%</span>
-                                          </div>
-                                        ))}
-                                        <div className="text-[9px] text-slate-400 mt-1">{dr.totalCells} valid cells</div>
-                                      </div>
-                                    </div>
-                                  </div>
-                                ))}
-                                <div className="bg-blue-50 border border-blue-100 rounded-lg p-2 text-[10px] text-blue-600 flex items-start gap-1.5">
+                              <div className="space-y-3">
+                                {/* Summary table */}
+                                <div className="rounded-xl border border-slate-200 overflow-hidden">
+                                  <table className="w-full text-xs border-collapse">
+                                    <thead>
+                                      <tr className="bg-slate-50 border-b border-slate-200">
+                                        <th className="text-left py-2.5 px-3 text-[10px] text-slate-500 uppercase tracking-wide font-semibold w-6">#</th>
+                                        <th className="text-left py-2.5 px-3 text-[10px] text-slate-500 uppercase tracking-wide font-semibold">Criterion Pair</th>
+                                        <th className="text-center py-2.5 px-2 text-[10px] text-slate-500 uppercase tracking-wide font-semibold">Winner</th>
+                                        <th className="text-center py-2.5 px-2 text-[10px] text-slate-500 uppercase tracking-wide font-semibold">Robustness</th>
+                                        <th className="text-center py-2.5 px-2 text-[10px] text-slate-500 uppercase tracking-wide font-semibold">Flips</th>
+                                        <th className="text-center py-2.5 px-2 text-[10px] text-slate-500 uppercase tracking-wide font-semibold">Cells</th>
+                                        <th className="w-8"></th>
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      {dualResults.map((dr, di) => {
+                                        const isExpanded = expandedDualPairs[di]
+                                        const isCritical = parseFloat(dr.baseWinPct) < 60
+                                        const isWarning = parseFloat(dr.baseWinPct) < 80 && !isCritical
+                                        const robustColor = parseFloat(dr.baseWinPct) >= 80 ? 'bg-emerald-500' : parseFloat(dr.baseWinPct) >= 60 ? 'bg-amber-500' : 'bg-red-500'
+                                        return (
+                                          <React.Fragment key={di}>
+                                            <tr
+                                              onClick={() => setExpandedDualPairs(p => ({ ...p, [di]: !p[di] }))}
+                                              className={`border-b border-slate-100 cursor-pointer transition-colors group ${
+                                                isCritical ? 'bg-red-50/40 hover:bg-red-50/70' :
+                                                isWarning ? 'bg-amber-50/30 hover:bg-amber-50/50' :
+                                                'hover:bg-slate-50/80'
+                                              }`}
+                                            >
+                                              <td className="py-3 px-3">
+                                                {isCritical ? (
+                                                  <span className="inline-flex w-5 h-5 rounded-full items-center justify-center text-[9px] font-bold bg-red-100 text-red-600">!</span>
+                                                ) : (
+                                                  <span className="text-[11px] font-mono text-slate-400">{di + 1}</span>
+                                                )}
+                                              </td>
+                                              <td className="py-3 px-3">
+                                                <span className="font-semibold text-slate-800">{dr.crit1.name}</span>
+                                                <span className="text-slate-300 mx-1.5">×</span>
+                                                <span className="font-semibold text-slate-800">{dr.crit2.name}</span>
+                                              </td>
+                                              <td className="py-3 px-2 text-center">
+                                                <span className={`inline-block font-mono font-bold px-2 py-0.5 rounded-full text-[10px] ${
+                                                  parseFloat(dr.baseWinPct) >= 80 ? 'bg-emerald-100 text-emerald-700' :
+                                                  parseFloat(dr.baseWinPct) >= 60 ? 'bg-amber-100 text-amber-700' :
+                                                  'bg-red-100 text-red-700'
+                                                }`}>{dr.baseWinner}</span>
+                                              </td>
+                                              <td className="py-3 px-2 text-center">
+                                                <div className="inline-flex items-center gap-1.5">
+                                                  <div className="w-14 bg-slate-200 rounded-full h-1.5 overflow-hidden">
+                                                    <div className={`h-full rounded-full transition-all ${robustColor}`} style={{ width: `${dr.baseWinPct}%` }} />
+                                                  </div>
+                                                  <span className={`font-mono font-bold text-[11px] ${
+                                                    parseFloat(dr.baseWinPct) >= 80 ? 'text-emerald-600' :
+                                                    parseFloat(dr.baseWinPct) >= 60 ? 'text-amber-600' :
+                                                    'text-red-600'
+                                                  }`}>{dr.baseWinPct}%</span>
+                                                </div>
+                                              </td>
+                                              <td className="py-3 px-2 text-center">
+                                                <span className={`font-mono font-bold text-[11px] ${parseFloat(dr.flipPct) > 20 ? 'text-red-500' : parseFloat(dr.flipPct) > 0 ? 'text-amber-500' : 'text-emerald-500'}`}>
+                                                  {parseFloat(dr.flipPct) > 0 ? `${dr.flipPct}%` : '0%'}
+                                                </span>
+                                              </td>
+                                              <td className="py-3 px-2 text-center font-mono text-[11px] text-slate-400">{dr.totalCells}</td>
+                                              <td className="py-3 px-2 text-right">
+                                                <ChevronRight size={14} className={`text-slate-300 group-hover:text-slate-500 transition-all duration-200 ${isExpanded ? 'rotate-90' : ''}`} />
+                                              </td>
+                                            </tr>
+                                            {isExpanded && (
+                                              <tr>
+                                                <td colSpan={7} className="p-0">
+                                                  <div className={`px-4 py-4 border-b-2 ${isCritical ? 'bg-red-50/30 border-red-100' : isWarning ? 'bg-amber-50/20 border-amber-100' : 'bg-slate-50/50 border-slate-100'}`}>
+                                                    <div className="flex gap-4 flex-wrap">
+                                                      {/* Mini heatmap */}
+                                                      <div className="flex gap-2">
+                                                        <div>
+                                                          <div style={{ display: 'grid', gridTemplateColumns: `repeat(${dr.steps}, minmax(8px, 14px))`, gap: '1px' }}>
+                                                            {Array.from({ length: dr.steps }).reverse().map((_, ryi) => {
+                                                              const w2 = (dr.steps - 1 - ryi) * dr.step
+                                                              return Array.from({ length: dr.steps }).map((_, xi) => {
+                                                                const w1 = xi * dr.step
+                                                                const cell = dr.grid.find(g => g.w1 === w1 && g.w2 === w2)
+                                                                if (!cell || !cell.winnerId) return <div key={`${w1}_${w2}`} className="aspect-square rounded-[1px] bg-slate-200/50" />
+                                                                const altIdx = alternatives.findIndex(a => a.id === cell.winnerId)
+                                                                const isCurrent = Math.abs(w1 - dr.currentW1) < dr.step && Math.abs(w2 - dr.currentW2) < dr.step
+                                                                return <div key={`${w1}_${w2}`} className={`aspect-square rounded-[1px] ${isCurrent ? 'ring-1 ring-slate-800 z-10' : ''}`} style={{ backgroundColor: ALT_COLORS[altIdx % ALT_COLORS.length] }} title={`${dr.crit1.name}: ${w1}% / ${dr.crit2.name}: ${w2}% → ${cell.winnerName}`} />
+                                                              })
+                                                            })}
+                                                          </div>
+                                                          <div className="text-[8px] text-slate-400 text-center mt-0.5">{dr.crit1.name}</div>
+                                                        </div>
+                                                        <div className="flex items-center">
+                                                          <span className="text-[8px] text-slate-400" style={{ writingMode: 'vertical-rl', transform: 'rotate(180deg)' }}>{dr.crit2.name}</span>
+                                                        </div>
+                                                      </div>
+                                                      {/* Win frequency legend */}
+                                                      <div className="flex-1 min-w-[140px] space-y-1.5">
+                                                        <div className="text-[10px] font-semibold text-slate-500 uppercase tracking-wide mb-2">Win Distribution</div>
+                                                        {dr.winFrequency.filter(w => w.count > 0).map(w => (
+                                                          <div key={w.id} className="flex items-center gap-2">
+                                                            <div className="w-3 h-3 rounded-sm shrink-0" style={{ backgroundColor: ALT_COLORS[alternatives.findIndex(a => a.id === w.id) % ALT_COLORS.length] }} />
+                                                            <span className="text-[11px] font-medium text-slate-700 truncate">{w.name}</span>
+                                                            <div className="flex-1 bg-slate-200 rounded-full h-1 overflow-hidden ml-1">
+                                                              <div className="h-full rounded-full" style={{ width: `${w.pct}%`, backgroundColor: ALT_COLORS[alternatives.findIndex(a => a.id === w.id) % ALT_COLORS.length] }} />
+                                                            </div>
+                                                            <span className="text-[11px] font-mono font-bold text-slate-600 shrink-0">{w.pct.toFixed(1)}%</span>
+                                                          </div>
+                                                        ))}
+                                                        <div className="text-[9px] text-slate-400 mt-2 pt-1 border-t border-slate-200">
+                                                          Current weights: {dr.crit1.name} = {dr.currentW1}%, {dr.crit2.name} = {dr.currentW2}%
+                                                        </div>
+                                                      </div>
+                                                    </div>
+                                                  </div>
+                                                </td>
+                                              </tr>
+                                            )}
+                                          </React.Fragment>
+                                        )
+                                      })}
+                                    </tbody>
+                                  </table>
+                                </div>
+
+                                <div className="bg-blue-50 border border-blue-100 rounded-lg p-2.5 text-[10px] text-blue-600 flex items-start gap-1.5">
                                   <Info size={11} className="shrink-0 mt-0.5" />
-                                  <span><strong>Method:</strong> Exhaustive grid sweep over every criterion pair with step size {sensStep}%. Remaining weight distributed proportionally. Sorted by base winner's dominance (ascending = least robust first).</span>
+                                  <span><strong>Method:</strong> Exhaustive grid sweep over every criterion pair with step size {sensStep}%. Remaining weight distributed proportionally. Sorted by base winner dominance (ascending = least robust first). Click any row to expand the heatmap.</span>
                                 </div>
                               </div>
                             )}
@@ -1484,9 +1619,142 @@ export default function App() {
 
       {/* ━━━ Footer ━━━ */}
       <div className="h-10" /> {/* spacer for fixed footer */}
-      <footer className="fixed bottom-0 left-0 right-0 z-40 border-t border-slate-200 bg-white/95 backdrop-blur py-2.5 text-center text-xs text-slate-400 shadow-[0_-2px_8px_rgba(0,0,0,0.04)]">
-        Provided by <strong className="text-slate-600">Dr. Sven-Erik Willrich</strong> · <a href="mailto:mail@svenwillrich.de" className="hover:text-primary transition">mail@svenwillrich.de</a>
+      <footer className="fixed bottom-0 left-0 right-0 z-40 border-t border-slate-200 bg-white/95 backdrop-blur py-2.5 shadow-[0_-2px_8px_rgba(0,0,0,0.04)]">
+        <div className="max-w-5xl mx-auto px-4 flex items-center justify-between">
+          <span className="text-xs text-slate-400">
+            Provided by <a href="https://svenwillrich.de" target="_blank" rel="noopener noreferrer" className="font-semibold text-slate-600 hover:text-primary transition">Dr. Sven-Erik Willrich</a> · <a href="mailto:mail@svenwillrich.de" className="hover:text-primary transition">mail@svenwillrich.de</a>
+          </span>
+          <button onClick={() => setShowAbout(true)} className="text-[10px] text-primary/60 hover:text-primary font-medium transition">About this tool</button>
+        </div>
       </footer>
+
+      {/* ═══ About This Tool Modal ═══ */}
+      {showAbout && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={() => setShowAbout(false)}>
+          <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full mx-4 max-h-[85vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+            {/* Header */}
+            <div className="sticky top-0 bg-gradient-to-br from-[#1e293b] via-[#334155] to-[#1e293b] rounded-t-2xl p-6 relative overflow-hidden">
+              <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top_right,rgba(79,110,247,0.3),transparent_50%)]" />
+              <div className="relative">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 bg-white/10 rounded-xl flex items-center justify-center backdrop-blur-sm border border-white/10">
+                      <BarChart3 size={20} className="text-white" />
+                    </div>
+                    <div>
+                      <h3 className="text-lg font-bold text-white">About This Tool</h3>
+                      <p className="text-white/50 text-xs">Multi-Criteria Decision Analysis Framework</p>
+                    </div>
+                  </div>
+                  <button onClick={() => setShowAbout(false)} className="p-1.5 rounded-lg hover:bg-white/10 text-white/50 hover:text-white transition"><X size={18} /></button>
+                </div>
+              </div>
+            </div>
+
+            <div className="p-6 space-y-5 text-sm text-slate-700 leading-relaxed">
+              {/* Intro */}
+              <div>
+                <p className="text-base text-slate-800 font-medium leading-relaxed">
+                  This <strong>Multi-Criteria Decision Analysis (MCDA)</strong> tool was designed and developed
+                  by <strong>Dr. Sven-Erik Willrich</strong> — a professional-grade decision analysis framework built on
+                  rigorous quantitative methods, designed to transform complex multi-criteria decisions into structured,
+                  transparent, and defensible outcomes.
+                </p>
+              </div>
+
+              {/* Key Features */}
+              <div>
+                <h4 className="flex items-center gap-2 font-bold text-slate-800 text-[13px] mb-3">
+                  <Sparkles size={14} className="text-primary" /> What Makes This Tool Unique
+                </h4>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  {[
+                    { icon: '🎓', title: 'Academically Grounded', desc: 'Based on the doctoral research of Dr. Sven-Erik Willrich at the Karlsruhe Institute of Technology (KIT), integrating state-of-the-art MCDA methodology with practical usability.' },
+                    { icon: '⚖️', title: '4 Weight Elicitation Methods', desc: 'Direct Rating, Likert Scale, full AHP (Analytic Hierarchy Process), and PC Simplified — a method empirically validated by Dr. Willrich with over 150 participants.' },
+                    { icon: '🔬', title: '4-Dimensional Sensitivity Analysis', desc: 'Single-criterion sweeps, exhaustive dual-criteria grid analysis, full n-dimensional combinatorial sweeps, and Monte Carlo simulation with Dirichlet-uniform sampling.' },
+                    { icon: '⚡', title: 'Real-Time Computation', desc: 'Live weight updates, min-max normalization with directional scoring (maximize/minimize), and instant part-worth decomposition.' },
+                  ].map((f, i) => (
+                    <div key={i} className="bg-slate-50 rounded-xl p-3 border border-slate-100">
+                      <div className="flex items-start gap-2.5">
+                        <span className="text-lg shrink-0 mt-0.5">{f.icon}</span>
+                        <div>
+                          <div className="text-xs font-bold text-slate-800 mb-0.5">{f.title}</div>
+                          <p className="text-[11px] text-slate-500 leading-relaxed">{f.desc}</p>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Research Foundation */}
+              <div className="bg-gradient-to-br from-primary/5 via-secondary/5 to-primary/5 rounded-xl p-4 border border-primary/10">
+                <h4 className="flex items-center gap-2 font-bold text-slate-800 text-[13px] mb-2">
+                  <Shield size={14} className="text-primary" /> Research Foundation
+                </h4>
+                <p className="text-xs text-slate-600 leading-relaxed">
+                  Dr. Sven-Erik Willrich's doctoral dissertation at KIT demonstrated that <strong>simplified pairwise comparison
+                  methods (PCS)</strong> can achieve comparable decision quality to full AHP while dramatically reducing cognitive
+                  load — making rigorous MCDA accessible to broader audiences including citizen participation contexts. The study
+                  with over 150 participants confirmed that PCS produces comparable rankings with 60%+ faster completion times.
+                </p>
+                <p className="text-xs text-slate-600 leading-relaxed mt-2">
+                  The <strong>sensitivity analysis suite</strong> in this tool goes beyond traditional one-at-a-time approaches:
+                  the exhaustive pairwise grid sweep reveals exactly which criterion weight combinations lead to ranking changes,
+                  while Monte Carlo simulation provides probabilistic robustness assessment across the entire weight space.
+                  This comprehensive approach ensures that decision-makers understand not only <em>what</em> the best option is,
+                  but <em>how stable</em> that conclusion is under varying assumptions.
+                </p>
+              </div>
+
+              {/* Best Practices */}
+              <div>
+                <h4 className="flex items-center gap-2 font-bold text-slate-800 text-[13px] mb-2">
+                  <Target size={14} className="text-secondary" /> Best Practices Integrated
+                </h4>
+                <ul className="space-y-1.5 text-xs text-slate-600">
+                  <li className="flex items-start gap-2"><span className="text-emerald-500 font-bold mt-px">✓</span> <span><strong>Min-max normalization</strong> for commensurable utility scores across heterogeneous criteria</span></li>
+                  <li className="flex items-start gap-2"><span className="text-emerald-500 font-bold mt-px">✓</span> <span><strong>Directional scoring</strong> — automatic handling of maximize vs. minimize criteria</span></li>
+                  <li className="flex items-start gap-2"><span className="text-emerald-500 font-bold mt-px">✓</span> <span><strong>AHP eigenvector method</strong> for deriving consistent weights from pairwise comparisons (Saaty, 1980)</span></li>
+                  <li className="flex items-start gap-2"><span className="text-emerald-500 font-bold mt-px">✓</span> <span><strong>PC Simplified</strong> with n-1 adjacent comparisons for guaranteed consistency (Koczkodaj & Szybowski, 2015; Willrich, 2021)</span></li>
+                  <li className="flex items-start gap-2"><span className="text-emerald-500 font-bold mt-px">✓</span> <span><strong>Dirichlet-uniform sampling</strong> for unbiased Monte Carlo weight space exploration</span></li>
+                  <li className="flex items-start gap-2"><span className="text-emerald-500 font-bold mt-px">✓</span> <span><strong>Exhaustive combinatorial sweeps</strong> for complete robustness characterization across all criterion pairs and higher-order combinations</span></li>
+                </ul>
+              </div>
+
+              {/* Use Cases */}
+              <div>
+                <h4 className="font-bold text-slate-800 text-[13px] mb-2">Built For</h4>
+                <div className="flex flex-wrap gap-1.5">
+                  {['Strategic business decisions', 'Technology platform selection', 'Investment analysis', 'Urban planning', 'Public participation', 'Academic research', 'Consulting engagements', 'Product evaluation'].map(u => (
+                    <span key={u} className="px-2.5 py-1 bg-slate-100 rounded-full text-[10px] font-medium text-slate-600">{u}</span>
+                  ))}
+                </div>
+              </div>
+
+              {/* Reference */}
+              <div className="bg-slate-50 rounded-xl p-3 text-[10px] text-slate-500 space-y-1.5 border border-slate-100">
+                <p className="font-bold text-slate-600 text-[11px]">References</p>
+                <p>Willrich, S.-E. (2021). <em>Participatory Multi-Criteria Decision-Making for Common Goods.</em> Doctoral dissertation, Karlsruhe Institute of Technology (KIT).</p>
+                <p>Koczkodaj, W. W. & Szybowski, J. (2015). <em>Pairwise comparisons simplified.</em> Applied Mathematics and Computation, 253, 387–394.</p>
+                <p>Saaty, T. L. (1980). <em>The Analytic Hierarchy Process.</em> McGraw-Hill, New York.</p>
+              </div>
+
+              {/* Contact */}
+              <div className="text-center pt-2 pb-1">
+                <p className="text-xs text-slate-500">
+                  Designed & developed by <strong className="text-slate-700">Dr. Sven-Erik Willrich</strong>
+                </p>
+                <p className="text-[11px] text-slate-400 mt-1 space-x-2">
+                  <a href="https://svenwillrich.de" target="_blank" rel="noopener noreferrer" className="text-primary hover:text-primary/80 transition font-medium">svenwillrich.de</a>
+                  <span className="text-slate-300">·</span>
+                  <a href="mailto:mail@svenwillrich.de" className="text-primary/70 hover:text-primary transition">mail@svenwillrich.de</a>
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ═══ PCS Research & Methodology Modal ═══ */}
       {showPcsInfo && (
