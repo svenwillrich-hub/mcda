@@ -12,6 +12,6 @@ COPY vite.config.js tailwind.config.js postcss.config.js index.html ./
 # Source code is mounted as volume — not copied
 # This allows hot-reload without rebuilding
 
-EXPOSE 5173
+EXPOSE 80
 
 CMD ["npm", "run", "dev"]

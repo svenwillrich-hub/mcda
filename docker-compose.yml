@@ -7,7 +7,7 @@ services:
       dockerfile: Dockerfile
     container_name: mcda-app
     ports:
-      - "8888:5173"
+      - "8888:80"
     volumes:
       - ./src:/app/src
       - ./index.html:/app/index.html
