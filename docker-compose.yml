@@ -1,0 +1,19 @@
+version: "3.8"
+
+services:
+  mcda:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mcda-app
+    ports:
+      - "8888:5173"
+    volumes:
+      - ./src:/app/src
+      - ./index.html:/app/index.html
+      - ./vite.config.js:/app/vite.config.js
+      - ./tailwind.config.js:/app/tailwind.config.js
+      - ./postcss.config.js:/app/postcss.config.js
+    environment:
+      - CHOKIDAR_USEPOLLING=true
+    restart: unless-stopped
