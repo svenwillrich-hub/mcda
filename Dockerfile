@@ -9,8 +9,8 @@ RUN npm install
 # Copy config files (these rarely change)
 COPY vite.config.js tailwind.config.js postcss.config.js index.html ./
 
-# Source code is mounted as volume — not copied
-# This allows hot-reload without rebuilding
+# Copy source code
+COPY src ./src
 
 EXPOSE 80
 
