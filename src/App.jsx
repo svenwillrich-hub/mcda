@@ -4,9 +4,9 @@ import {
   LineChart, Line, Cell, ReferenceLine
 } from 'recharts'
 import {
-  Plus, Trash2, Upload, Download, ChevronDown, Trophy, Info,
+  Plus, Trash2, Upload, Download, ChevronDown, Trophy, Info, X,
   TrendingUp, TrendingDown, Zap, Target, GripVertical,
-  ChevronRight, ChevronUp, Sliders, Lock, Minus
+  ChevronRight, ChevronUp, Sliders, Lock, Minus, Shuffle
 } from 'lucide-react'
 
 // ─── Constants ──────────────────────────────────────────────────────────────────
@@ -112,6 +112,123 @@ function runFullSensitivity(criteria, alternatives, scores) {
   })
 }
 
+function runMultiCriteriaSensitivity(criteria, alternatives, scores, selectedIds) {
+  if (criteria.length < 2 || alternatives.length < 2 || selectedIds.length < 2) return null
+  const N = 2000
+  const base = computeMCDA(criteria, alternatives, scores)
+  const baseWinnerId = base.ranking[0]?.id
+  const winCount = {}
+  alternatives.forEach(a => { winCount[a.id] = { id: a.id, name: a.name, count: 0 } })
+  let flipCount = 0
+  for (let sim = 0; sim < N; sim++) {
+    const overrides = {}
+    if (selectedIds.length === criteria.length) {
+      const exps = criteria.map(() => -Math.log(Math.random() + 1e-12))
+      const total = exps.reduce((s, v) => s + v, 0)
+      criteria.forEach((c, i) => { overrides[c.id] = (exps[i] / total) * 100 })
+    } else {
+      const selectedShare = Math.random() * 100
+      const fixedShare = 100 - selectedShare
+      const selExps = selectedIds.map(() => -Math.log(Math.random() + 1e-12))
+      const selTotal = selExps.reduce((s, v) => s + v, 0)
+      selectedIds.forEach((id, i) => { overrides[id] = (selExps[i] / selTotal) * selectedShare })
+      const fixedCriteria = criteria.filter(c => !selectedIds.includes(c.id))
+      const fixedOrigTotal = fixedCriteria.reduce((s, c) => s + c.weight, 0)
+      fixedCriteria.forEach(c => {
+        overrides[c.id] = fixedOrigTotal > 0 ? (c.weight / fixedOrigTotal) * fixedShare : fixedShare / fixedCriteria.length
+      })
+    }
+    const result = computeMCDA(criteria, alternatives, scores, overrides)
+    const winner = result.ranking[0]?.id
+    if (winner) winCount[winner].count++
+    if (winner !== baseWinnerId) flipCount++
+  }
+  return {
+    simulations: N,
+    selectedCount: selectedIds.length,
+    totalCriteria: criteria.length,
+    winFrequency: Object.values(winCount).map(w => ({ ...w, pct: w.count / N * 100 })).sort((a, b) => b.count - a.count),
+    baseWinner: base.ranking[0]?.name,
+    baseWinPct: ((N - flipCount) / N * 100).toFixed(1),
+    flipPct: (flipCount / N * 100).toFixed(1),
+  }
+}
+
+function getCombinations(arr, k) {
+  if (k === 1) return arr.map(x => [x])
+  const result = []
+  for (let i = 0; i <= arr.length - k; i++) {
+    const rest = getCombinations(arr.slice(i + 1), k - 1)
+    rest.forEach(combo => result.push([arr[i], ...combo]))
+  }
+  return result
+}
+
+function runCombinationSweep(criteria, alternatives, scores, selectedIds, step = 5) {
+  const selected = criteria.filter(c => selectedIds.includes(c.id))
+  const fixed = criteria.filter(c => !selectedIds.includes(c.id))
+  const fixedTotal = fixed.reduce((s, c) => s + c.weight, 0)
+  const base = computeMCDA(criteria, alternatives, scores)
+  const baseWinnerId = base.ranking[0]?.id
+  const k = selected.length
+  if (k < 2) return null
+  const winCount = {}
+  alternatives.forEach(a => { winCount[a.id] = { id: a.id, name: a.name, count: 0 } })
+  let totalCells = 0, flipCount = 0
+  const grid = []
+  const w = Array(k).fill(0)
+  const go = (idx, rem) => {
+    if (idx === k) {
+      const ov = {}
+      selected.forEach((c, i) => { ov[c.id] = w[i] })
+      fixed.forEach(c => { ov[c.id] = fixedTotal > 0 ? (c.weight / fixedTotal) * rem : rem / Math.max(fixed.length, 1) })
+      const r = computeMCDA(criteria, alternatives, scores, ov)
+      const winner = r.ranking[0]
+      totalCells++
+      if (winner) winCount[winner.id].count++
+      if (winner?.id !== baseWinnerId) flipCount++
+      if (k === 2) grid.push({ w1: w[0], w2: w[1], winnerId: winner?.id, winnerName: winner?.name })
+      return
+    }
+    for (let v = 0; v <= rem; v += step) { w[idx] = v; go(idx + 1, rem - v) }
+  }
+  go(0, 100)
+  // For 2D heatmap: also add invalid cells (w1+w2>100)
+  if (k === 2) {
+    const steps = Math.floor(100 / step) + 1
+    const fullGrid = []
+    for (let xi = 0; xi < steps; xi++) {
+      for (let yi = 0; yi < steps; yi++) {
+        const ww1 = xi * step, ww2 = yi * step
+        const existing = grid.find(g => g.w1 === ww1 && g.w2 === ww2)
+        fullGrid.push(existing || { w1: ww1, w2: ww2, winnerId: null, winnerName: null })
+      }
+    }
+    return {
+      selectedIds, selectedNames: selected.map(c => c.name), k,
+      grid: fullGrid, step, steps,
+      winFrequency: Object.values(winCount).map(ww => ({ ...ww, pct: totalCells > 0 ? ww.count / totalCells * 100 : 0 })).sort((a, b) => b.count - a.count),
+      totalCells, flipCount,
+      flipPct: totalCells > 0 ? (flipCount / totalCells * 100).toFixed(1) : '0',
+      baseWinner: base.ranking[0]?.name, baseWinnerId,
+      baseWinPct: totalCells > 0 ? ((totalCells - flipCount) / totalCells * 100).toFixed(1) : '0',
+      crit1: selected[0], crit2: selected[1],
+      currentW1: selected[0]?.weight, currentW2: selected[1]?.weight,
+    }
+  }
+  return {
+    selectedIds, selectedNames: selected.map(c => c.name), k,
+    grid: null, step, steps: null,
+    winFrequency: Object.values(winCount).map(ww => ({ ...ww, pct: totalCells > 0 ? ww.count / totalCells * 100 : 0 })).sort((a, b) => b.count - a.count),
+    totalCells, flipCount,
+    flipPct: totalCells > 0 ? (flipCount / totalCells * 100).toFixed(1) : '0',
+    baseWinner: base.ranking[0]?.name, baseWinnerId,
+    baseWinPct: totalCells > 0 ? ((totalCells - flipCount) / totalCells * 100).toFixed(1) : '0',
+    crit1: selected[0], crit2: selected[1],
+    currentW1: selected[0]?.weight, currentW2: selected[1]?.weight,
+  }
+}
+
 const LIKERT = [
   { value: 1, label: 'Not important' }, { value: 2, label: 'Slightly' }, { value: 3, label: 'Moderate' },
   { value: 4, label: 'Important' }, { value: 5, label: 'Very important' }, { value: 6, label: 'Critical' },
@@ -159,7 +276,20 @@ export default function App() {
   const [likertRatings, setLikertRatings] = useState({})
   const [dragCrit, setDragCrit] = useState(null)
   const [pairAnswers, setPairAnswers] = useState({})
-  const [resetConfirm, setResetConfirm] = useState(null) // null | 'likert' | 'pairwise'
+  const [pcsAnswers, setPcsAnswers] = useState({})
+  const [resetConfirm, setResetConfirm] = useState(null) // null | 'likert' | 'pairwise' | 'pcs'
+  const [showPcsInfo, setShowPcsInfo] = useState(false)
+  const [multiSensSelected, setMultiSensSelected] = useState({})
+  const [multiSensResults, setMultiSensResults] = useState(null)
+  const [analysisTab, setAnalysisTab] = useState('oat')
+  const [dualResults, setDualResults] = useState(null)
+  const [allCritResults, setAllCritResults] = useState(null)
+  const [allCritRunning, setAllCritRunning] = useState(false)
+  const [allCritProgress, setAllCritProgress] = useState(null)
+  const [sensStep, setSensStep] = useState(5)
+  const [mcSimCount, setMcSimCount] = useState(2000)
+  const [mcRunning, setMcRunning] = useState(false)
+  const mcAbortRef = useRef(false)
   const exRef = useRef(null)
   const sectionRefs = useRef({})
 
@@ -280,14 +410,58 @@ export default function App() {
     setCriteria(prev => prev.map((c, i) => ({ ...c, weight: Math.round(weights[i] * 100) })))
   }
 
+  // PCS: Pairwise Comparison Simplified (Koczkodaj & Szybowski 2015)
+  // Only n−1 adjacent pairs (PC principal generators) → always consistent
+  const pcsAdjacentPairs = useMemo(() => {
+    const pairs = []
+    for (let i = 0; i < criteria.length - 1; i++) {
+      pairs.push({ a: criteria[i], b: criteria[i + 1] })
+    }
+    return pairs
+  }, [criteria])
+
+  const applyPCSWeights = (answers) => {
+    const n = criteria.length
+    if (n < 2) return
+    // Build n×n matrix from n−1 adjacent pair judgments
+    const matrix = Array.from({ length: n }, () => Array(n).fill(1))
+    // Step 1: Fill superdiagonal from answers
+    for (let i = 0; i < n - 1; i++) {
+      const key = `${criteria[i].id}_${criteria[i + 1].id}`
+      const ans = answers[key] || 1
+      matrix[i][i + 1] = ans > 0 ? ans : 1 / Math.abs(ans)
+    }
+    // Step 2: Fill rest via transitivity — m[i][l] = ∏ m[j][j+1] for j=i..l−1
+    for (let i = 0; i < n - 1; i++) {
+      for (let l = i + 2; l < n; l++) {
+        let product = 1
+        for (let j = i; j < l; j++) product *= matrix[j][j + 1]
+        matrix[i][l] = product
+      }
+    }
+    // Step 3: Fill lower triangle via reciprocity — m[l][i] = 1/m[i][l]
+    for (let i = 0; i < n; i++) {
+      for (let l = i + 1; l < n; l++) matrix[l][i] = 1 / matrix[i][l]
+    }
+    // Step 4: Geometric mean of each row → normalize → weights
+    const geoMeans = []
+    for (let i = 0; i < n; i++) {
+      let product = 1
+      for (let j = 0; j < n; j++) product *= matrix[i][j]
+      geoMeans.push(Math.pow(product, 1 / n))
+    }
+    const total = geoMeans.reduce((s, v) => s + v, 0)
+    setCriteria(prev => prev.map((c, i) => ({ ...c, weight: total > 0 ? Math.round((geoMeans[i] / total) * 100) : 0 })))
+  }
+
   const handleMethodSwitch = (newMethod) => {
     if (newMethod === 'direct') {
       setWeightMethod('direct')
       setResetConfirm(null)
       return
     }
-    // For likert & pairwise: warn that weights will be reset
-    if (newMethod === 'likert' || newMethod === 'pairwise') {
+    // For likert, pairwise & pcs: warn that weights will be reset
+    if (newMethod === 'likert' || newMethod === 'pairwise' || newMethod === 'pcs') {
       if (totalWeight > 0) {
         setResetConfirm(newMethod)
         return
@@ -299,7 +473,109 @@ export default function App() {
     setWeightMethod(method)
     setResetConfirm(null)
     if (method === 'pairwise') { setPairAnswers({}); applyPairwiseWeights({}) }
+    if (method === 'pcs') { setPcsAnswers({}); applyPCSWeights({}) }
     if (method === 'likert') { setLikertRatings({}) }
+  }
+
+  // ─── Monte Carlo (animated) ────────────────────────────────────────────────
+  const startMonteCarlo = () => {
+    const selIds = criteria.filter(c => multiSensSelected[c.id] !== false).map(c => c.id)
+    if (selIds.length < 2) return
+    const crit = criteria.map(c => ({ ...c }))
+    const alts = alternatives.map(a => ({ ...a }))
+    const scr = JSON.parse(JSON.stringify(scores))
+    const base = computeMCDA(crit, alts, scr)
+    const baseWinnerId = base.ranking[0]?.id
+    const baseName = base.ranking[0]?.name
+    const totalSims = mcSimCount
+    const wc = {}
+    alts.forEach(a => { wc[a.id] = { id: a.id, name: a.name, count: 0 } })
+    let flipCount = 0, done = 0
+    mcAbortRef.current = false
+    setMcRunning(true)
+    setMultiSensResults(null)
+    const tick = () => {
+      if (mcAbortRef.current) { setMcRunning(false); return }
+      const batch = Math.min(100, totalSims - done)
+      for (let i = 0; i < batch; i++) {
+        const ov = {}
+        if (selIds.length === crit.length) {
+          const e = crit.map(() => -Math.log(Math.random() + 1e-12))
+          const t = e.reduce((a, b) => a + b, 0)
+          crit.forEach((c, j) => { ov[c.id] = (e[j] / t) * 100 })
+        } else {
+          const ss = Math.random() * 100, fs = 100 - ss
+          const e = selIds.map(() => -Math.log(Math.random() + 1e-12))
+          const t = e.reduce((a, b) => a + b, 0)
+          selIds.forEach((id, j) => { ov[id] = (e[j] / t) * ss })
+          const fc = crit.filter(c => !selIds.includes(c.id))
+          const ft = fc.reduce((a, c) => a + c.weight, 0)
+          fc.forEach(c => { ov[c.id] = ft > 0 ? (c.weight / ft) * fs : fs / fc.length })
+        }
+        const r = computeMCDA(crit, alts, scr, ov)
+        const w = r.ranking[0]?.id
+        if (w) wc[w].count++
+        if (w !== baseWinnerId) flipCount++
+        done++
+      }
+      setMultiSensResults({
+        simulations: done, totalPlanned: totalSims,
+        selectedCount: selIds.length, totalCriteria: crit.length,
+        winFrequency: Object.values(wc).map(w => ({ ...w, pct: done > 0 ? w.count / done * 100 : 0 })).sort((a, b) => b.count - a.count),
+        baseWinner: baseName,
+        baseWinPct: done > 0 ? ((done - flipCount) / done * 100).toFixed(1) : '0',
+        flipPct: done > 0 ? (flipCount / done * 100).toFixed(1) : '0',
+      })
+      if (done < totalSims) { setTimeout(tick, 16) } else { setMcRunning(false) }
+    }
+    tick()
+  }
+
+  // ─── Dual + All-Criteria Sweeps ────────────────────────────────────────────
+  const runAllDualSweeps = () => {
+    const results = []
+    for (let i = 0; i < criteria.length; i++) {
+      for (let j = i + 1; j < criteria.length; j++) {
+        const r = runCombinationSweep(criteria, alternatives, scores, [criteria[i].id, criteria[j].id], sensStep)
+        if (r) results.push(r)
+      }
+    }
+    results.sort((a, b) => parseFloat(a.baseWinPct) - parseFloat(b.baseWinPct))
+    setDualResults(results)
+  }
+
+  const startAllCritSweep = () => {
+    const ids = criteria.map(c => c.id)
+    const allCombos = []
+    for (let k = 2; k <= ids.length; k++) {
+      getCombinations(ids, k).forEach(combo => allCombos.push(combo))
+    }
+    const crit = criteria.map(c => ({ ...c }))
+    const alts = alternatives.map(a => ({ ...a }))
+    const scr = JSON.parse(JSON.stringify(scores))
+    const step = sensStep
+    setAllCritRunning(true)
+    setAllCritResults([])
+    setAllCritProgress({ done: 0, total: allCombos.length })
+    let idx = 0
+    const results = []
+    const tick = () => {
+      if (idx >= allCombos.length) {
+        results.sort((a, b) => parseFloat(a.baseWinPct) - parseFloat(b.baseWinPct))
+        setAllCritResults([...results])
+        setAllCritRunning(false)
+        return
+      }
+      const combo = allCombos[idx]
+      const result = runCombinationSweep(crit, alts, scr, combo, step)
+      if (result) results.push(result)
+      idx++
+      const sorted = [...results].sort((a, b) => parseFloat(a.baseWinPct) - parseFloat(b.baseWinPct))
+      setAllCritResults(sorted)
+      setAllCritProgress({ done: idx, total: allCombos.length })
+      setTimeout(tick, 0)
+    }
+    tick()
   }
 
   // ─── Alternatives ───────────────────────────────────────────────────────────
@@ -309,10 +585,10 @@ export default function App() {
   const setScore = (aId, cId, v) => setScores(p => ({ ...p, [aId]: { ...(p[aId] || {}), [cId]: v } }))
 
   // ─── Load / Export ──────────────────────────────────────────────────────────
-  const loadExample = (k) => { const e = EXAMPLES[k]; setTitle(e.title || ''); setProblem(e.problem); setCriteria(e.criteria.map(c => ({ ...c }))); setAlternatives(e.alternatives.map(a => ({ ...a }))); setScores(JSON.parse(JSON.stringify(e.scores))); setSensitivityResults(null); setLikertRatings({}); setExampleOpen(false) }
+  const loadExample = (k) => { const e = EXAMPLES[k]; setTitle(e.title || ''); setProblem(e.problem); setCriteria(e.criteria.map(c => ({ ...c }))); setAlternatives(e.alternatives.map(a => ({ ...a }))); setScores(JSON.parse(JSON.stringify(e.scores))); setSensitivityResults(null); setLikertRatings({}); setPairAnswers({}); setPcsAnswers({}); setExampleOpen(false) }
   const exportJSON = () => { const b = new Blob([JSON.stringify({ v: 2, title, problem, criteria, alternatives, scores }, null, 2)], { type: 'application/json' }); const u = URL.createObjectURL(b); const a = document.createElement('a'); a.href = u; a.download = 'mcda.json'; a.click(); URL.revokeObjectURL(u) }
   const fileRef = useRef(null)
-  const importJSON = (e) => { const f = e.target.files?.[0]; if (!f) return; const r = new FileReader(); r.onload = (ev) => { try { const d = JSON.parse(ev.target.result); setTitle(d.title || ''); setProblem(d.problem || ''); setCriteria(d.criteria || []); setAlternatives(d.alternatives || []); setScores(d.scores || {}); setSensitivityResults(null); setLikertRatings({}) } catch { alert('Invalid JSON') } }; r.readAsText(f); e.target.value = '' }
+  const importJSON = (e) => { const f = e.target.files?.[0]; if (!f) return; const r = new FileReader(); r.onload = (ev) => { try { const d = JSON.parse(ev.target.result); setTitle(d.title || ''); setProblem(d.problem || ''); setCriteria(d.criteria || []); setAlternatives(d.alternatives || []); setScores(d.scores || {}); setSensitivityResults(null); setLikertRatings({}); setPairAnswers({}); setPcsAnswers({}) } catch { alert('Invalid JSON') } }; r.readAsText(f); e.target.value = '' }
 
   const scrollTo = (id) => { if (!unlocked[id]) return; sectionRefs.current[id]?.scrollIntoView({ behavior: 'smooth', block: 'start' }) }
   const sectionIdx = SECTIONS.findIndex(s => s.id === activeSection)
@@ -395,6 +671,11 @@ export default function App() {
                   active && ok ? 'border-primary/30 shadow-xl shadow-primary/[0.06] ring-1 ring-primary/10' : 'border-slate-200 shadow-sm'
                 }`}>
                   <div className="p-5 sm:p-6">
+                    {/* Section heading */}
+                    <div className="flex items-center gap-2.5 mb-4 pb-3 border-b border-slate-100">
+                      <span className="flex items-center justify-center w-7 h-7 rounded-lg bg-primary/10 text-sm font-bold text-primary shrink-0">{sec.num}</span>
+                      <h3 className="text-[15px] font-bold text-slate-800 tracking-tight">{sec.label}</h3>
+                    </div>
 
                     {/* ═══ 1. PROBLEM ═══ */}
                     {sec.id === 'problem' && (
@@ -453,6 +734,8 @@ export default function App() {
                             <p className="text-xs text-amber-700">
                               {resetConfirm === 'likert'
                                 ? 'The Likert scale uses discrete 1–6 ratings which cannot precisely represent arbitrary continuous weight values. Switching will reset your current weights and start fresh from the Likert inputs.'
+                                : resetConfirm === 'pcs'
+                                ? 'PC Simplified uses only n−1 adjacent comparisons (Koczkodaj & Szybowski, 2015) to reconstruct a fully consistent matrix. This resets your current weights.'
                                 : 'Pairwise comparison derives weights from relative preference judgments. This process starts from scratch and will overwrite your current weights with the computed result.'}
                             </p>
                             <div className="flex gap-2 pt-1">
@@ -465,11 +748,12 @@ export default function App() {
                         {/* Method panel (above the bars) */}
                         {weightMethodOpen && !resetConfirm && (
                           <div className="bg-slate-50 rounded-xl p-4 border border-slate-200 space-y-3">
-                            <div className="flex gap-1">
+                            <div className="flex gap-1 flex-wrap">
                               {[
                                 { id: 'direct', label: 'Direct Rating' },
                                 { id: 'likert', label: 'Likert Scale' },
-                                { id: 'pairwise', label: 'Pairwise Comparison' },
+                                { id: 'pairwise', label: 'Pairwise (AHP)' },
+                                { id: 'pcs', label: 'PC Simplified' },
                               ].map(m => (
                                 <button key={m.id} onClick={() => handleMethodSwitch(m.id)}
                                   className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${weightMethod === m.id ? 'bg-primary text-white' : 'bg-white text-slate-500 hover:bg-slate-100 border border-slate-200'}`}>
@@ -537,7 +821,7 @@ export default function App() {
                                     </div>
 
                                     {/* All pairs list */}
-                                    <div className="space-y-2 max-h-[480px] overflow-y-auto pr-1">
+                                    <div className="space-y-2">
                                       {pairPairs.map((pair, idx) => {
                                         const key = `${pair.a.id}_${pair.b.id}`
                                         const answered = key in pairAnswers
@@ -591,6 +875,97 @@ export default function App() {
                                     )}
 
                                     <button onClick={() => { setPairAnswers({}); applyPairwiseWeights({}) }} className="text-[10px] text-slate-400 hover:text-red-500 font-medium transition">
+                                      Reset all pairs
+                                    </button>
+                                  </>
+                                )}
+                              </div>
+                            )}
+
+                            {/* PC Simplified (Koczkodaj & Szybowski 2015) — n−1 adjacent pairs */}
+                            {weightMethod === 'pcs' && (
+                              <div className="space-y-3">
+                                {pcsAdjacentPairs.length === 0 ? (
+                                  <p className="text-xs text-slate-400 italic">Need at least 2 criteria for pairwise comparison.</p>
+                                ) : (
+                                  <>
+                                    <div className="bg-blue-50 border border-blue-100 rounded-lg p-2 text-[10px] text-blue-700 flex items-start gap-1.5">
+                                      <Info size={11} className="shrink-0 mt-0.5" />
+                                      <span>
+                                        <strong>PC Simplified</strong> (Koczkodaj & Szybowski, 2015; empirically validated by Willrich, 2021): Only <strong>{pcsAdjacentPairs.length}</strong> adjacent
+                                        pairs instead of {pairPairs.length} — always consistent.{' '}
+                                        <button onClick={() => setShowPcsInfo(true)} className="inline-flex items-center gap-0.5 underline font-semibold hover:text-blue-900 transition">Research & Methodology ↗</button>
+                                      </span>
+                                    </div>
+
+                                    <p className="text-[10px] text-slate-400">
+                                      Compare adjacent criteria — which is more important? Default is <strong>1 (equal)</strong>.
+                                      {Object.keys(pcsAnswers).length < pcsAdjacentPairs.length && <span className="text-amber-500 font-medium"> Highlighted pairs still at default.</span>}
+                                    </p>
+
+                                    {/* Progress */}
+                                    <div className="flex items-center gap-2">
+                                      <div className="flex-1 bg-slate-200 rounded-full h-1.5 overflow-hidden">
+                                        <div className="h-full bg-primary rounded-full transition-all duration-300" style={{ width: `${(Object.keys(pcsAnswers).length / pcsAdjacentPairs.length) * 100}%` }} />
+                                      </div>
+                                      <span className="text-[10px] font-mono text-slate-400">{Object.keys(pcsAnswers).length} / {pcsAdjacentPairs.length} rated</span>
+                                    </div>
+
+                                    {/* Adjacent pairs list */}
+                                    <div className="space-y-2">
+                                      {pcsAdjacentPairs.map((pair, idx) => {
+                                        const key = `${pair.a.id}_${pair.b.id}`
+                                        const answered = key in pcsAnswers
+                                        const currentVal = pcsAnswers[key] ?? 1
+                                        const scaleValues = [9, 7, 5, 3, 1, -3, -5, -7, -9]
+                                        return (
+                                          <div key={key} className={`rounded-xl p-3 border transition-all ${answered ? 'bg-white border-slate-200' : 'bg-amber-50/50 border-amber-200/70 ring-1 ring-amber-100'}`}>
+                                            <div className="flex items-center gap-2 mb-2">
+                                              <span className="text-[10px] font-mono text-slate-300 w-4 text-right shrink-0">{idx + 1}.</span>
+                                              <span className="text-[11px] font-bold text-primary flex-1 truncate">{pair.a.name || '—'}</span>
+                                              <span className="text-[10px] text-slate-300 font-medium shrink-0">vs</span>
+                                              <span className="text-[11px] font-bold text-secondary flex-1 truncate text-right">{pair.b.name || '—'}</span>
+                                            </div>
+                                            <div className="flex items-center gap-0.5">
+                                              <span className="text-[8px] text-primary w-4 text-center shrink-0 font-bold">◀</span>
+                                              {scaleValues.map(val => {
+                                                const isSelected = currentVal === val
+                                                const isCenter = val === 1
+                                                const isLeft = val > 1
+                                                return (
+                                                  <button key={val}
+                                                    onClick={() => {
+                                                      const newAnswers = { ...pcsAnswers, [key]: val }
+                                                      setPcsAnswers(newAnswers)
+                                                      applyPCSWeights(newAnswers)
+                                                    }}
+                                                    title={`${Math.abs(val)} — ${val === 1 ? 'Equal' : val > 0 ? pair.a.name + ' preferred' : pair.b.name + ' preferred'}`}
+                                                    className={`flex-1 py-1.5 rounded text-[10px] font-bold transition border ${
+                                                      isSelected
+                                                        ? isCenter ? 'border-slate-600 bg-slate-600 text-white shadow-sm'
+                                                          : isLeft ? 'border-primary bg-primary text-white shadow-sm'
+                                                          : 'border-secondary bg-secondary text-white shadow-sm'
+                                                        : 'border-slate-200 bg-white text-slate-400 hover:bg-slate-50'
+                                                    }`}
+                                                  >
+                                                    {Math.abs(val)}
+                                                  </button>
+                                                )
+                                              })}
+                                              <span className="text-[8px] text-secondary w-4 text-center shrink-0 font-bold">▶</span>
+                                            </div>
+                                          </div>
+                                        )
+                                      })}
+                                    </div>
+
+                                    {Object.keys(pcsAnswers).length === pcsAdjacentPairs.length && (
+                                      <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-2 text-xs text-emerald-700 font-semibold flex items-center gap-1.5">
+                                        <span>✓</span> All {pcsAdjacentPairs.length} pairs rated — consistent matrix reconstructed via geometric mean.
+                                      </div>
+                                    )}
+
+                                    <button onClick={() => { setPcsAnswers({}); applyPCSWeights({}) }} className="text-[10px] text-slate-400 hover:text-red-500 font-medium transition">
                                       Reset all pairs
                                     </button>
                                   </>
@@ -789,43 +1164,313 @@ export default function App() {
                     {/* ═══ 7. ANALYSIS ═══ */}
                     {sec.id === 'analysis' && (
                       <div className="space-y-5">
-                        <p className="text-[11px] text-slate-400">Sweeps each criterion's weight 0→100% and detects where ranking flips.</p>
-                        <button onClick={() => setSensitivityResults(runFullSensitivity(criteria, alternatives, scores))} className="flex items-center gap-2 px-4 py-2 bg-primary text-white rounded-lg text-xs font-semibold hover:bg-primary/90 transition shadow-sm"><Zap size={14} /> Run Full Sensitivity Analysis</button>
-                        {sensitivityResults && (<>
-                          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
-                            {sensitivityResults.map(sr => (
-                              <div key={sr.criterion.id} className={`rounded-xl p-3.5 border text-xs ${sr.isStable ? 'bg-emerald-50 border-emerald-200' : 'bg-amber-50 border-amber-200'}`}>
-                                <div className="font-semibold text-slate-700 mb-0.5">{sr.criterion.name}</div>
-                                <div className="text-slate-500">Current weight: <span className="font-mono font-bold">{sr.currentWeight}</span></div>
-                                {sr.isStable ? <div className="text-emerald-700 font-semibold mt-1.5">✓ Stable — winner doesn't change</div> : <div className="text-amber-700 font-semibold mt-1.5">⚠ Ranking flips at <span className="font-mono">{sr.breakpoint}%</span> → {sr.breakWinner} wins</div>}
-                              </div>
-                            ))}
+                        {/* ── Configuration ── */}
+                        <div className="flex items-center gap-4 flex-wrap text-[11px]">
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-slate-400 font-medium">Step Size</span>
+                            <select value={sensStep} onChange={e => setSensStep(Number(e.target.value))} className="border border-slate-200 rounded-md px-2 py-1 text-[11px] font-mono focus:outline-none focus:ring-1 focus:ring-primary/25 bg-white">
+                              <option value={1}>1%</option><option value={2}>2%</option><option value={5}>5%</option><option value={10}>10%</option>
+                            </select>
                           </div>
-                          {sensitivityResults.map(sr => (
-                            <div key={sr.criterion.id} className="bg-slate-50 rounded-xl p-4">
-                              <div className="flex items-center justify-between mb-2">
-                                <h4 className="text-xs font-semibold text-slate-700">{sr.criterion.name}</h4>
-                                {!sr.isStable && <span className="text-[10px] font-mono bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded-full">flip @ {sr.breakpoint}%</span>}
-                              </div>
-                              <ResponsiveContainer width="100%" height={190}>
-                                <LineChart data={sr.sweepData} margin={{ left: 5, right: 5 }}>
-                                  <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" /><XAxis dataKey="weight" tick={{ fontSize: 9 }} /><YAxis tick={{ fontSize: 9 }} domain={[0, 100]} /><Tooltip formatter={v => `${v}%`} labelFormatter={v => `Weight: ${v}%`} /><Legend wrapperStyle={{ fontSize: 10 }} />
-                                  <ReferenceLine x={sr.currentWeight} stroke="#64748b" strokeDasharray="4 4" label={{ value: 'now', fontSize: 9, fill: '#64748b' }} />
-                                  {!sr.isStable && <ReferenceLine x={sr.breakpoint} stroke="#e84040" strokeDasharray="4 4" label={{ value: 'flip', fontSize: 9, fill: '#e84040' }} />}
-                                  {alternatives.map((a, i) => <Line key={a.id} type="monotone" dataKey={a.name} stroke={ALT_COLORS[i % ALT_COLORS.length]} strokeWidth={2} dot={false} />)}
-                                </LineChart>
-                              </ResponsiveContainer>
-                            </div>
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-slate-400 font-medium">MC Simulations</span>
+                            <select value={mcSimCount} onChange={e => setMcSimCount(Number(e.target.value))} className="border border-slate-200 rounded-md px-2 py-1 text-[11px] font-mono focus:outline-none focus:ring-1 focus:ring-primary/25 bg-white">
+                              <option value={500}>500</option><option value={1000}>1,000</option><option value={2000}>2,000</option><option value={5000}>5,000</option><option value={10000}>10,000</option>
+                            </select>
+                          </div>
+                        </div>
+
+                        {/* ── Four MECE Tabs ── */}
+                        <div className="flex gap-1 bg-slate-100 p-1 rounded-lg">
+                          {[
+                            { id: 'oat', label: 'Single Criterion', desc: '1D sweep' },
+                            { id: 'dual', label: 'Dual Criteria', desc: '2D all pairs' },
+                            { id: 'all', label: 'All Criteria', desc: 'exhaustive' },
+                            { id: 'mc', label: 'Monte Carlo', desc: 'nD random' },
+                          ].map(tab => (
+                            <button key={tab.id} onClick={() => setAnalysisTab(tab.id)}
+                              className={`flex-1 px-3 py-2 rounded-md text-xs font-semibold transition ${analysisTab === tab.id ? 'bg-white text-primary shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}>
+                              <div>{tab.label}</div>
+                              <div className="text-[9px] font-normal opacity-60">{tab.desc}</div>
+                            </button>
                           ))}
-                          <div className="bg-primary/5 border border-primary/15 rounded-xl p-3.5 text-xs">
-                            <strong>Summary:</strong>{' '}
-                            {(() => {
-                              const st = sensitivityResults.filter(s => s.isStable).length; const tot = sensitivityResults.length; const w = mcda.ranking[0]?.name || '—'; const un = sensitivityResults.filter(s => !s.isStable)
-                              if (st === tot) return <>{w} is <span className="text-emerald-600 font-semibold">robust</span> — no single criterion flips the ranking.</>
-                              return <>{w} wins but is <span className="text-amber-600 font-semibold">sensitive</span> to: {un.map((s, i) => <React.Fragment key={s.criterion.id}>{i > 0 && ', '}<strong>{s.criterion.name}</strong> ({s.breakpoint}%)</React.Fragment>)}. Stable in {st}/{tot}.</>
-                            })()}
+                        </div>
+
+                        {/* ══ TAB 1: Single Criterion (OAT) ══ */}
+                        {analysisTab === 'oat' && (
+                          <div className="space-y-4">
+                            <p className="text-[11px] text-slate-400">Sweeps <strong>one criterion at a time</strong> from 0→100% (step: {sensStep}%). Others scale proportionally. Detects where ranking flips.</p>
+                            <button onClick={() => setSensitivityResults(runFullSensitivity(criteria, alternatives, scores))} className="flex items-center gap-2 px-4 py-2 bg-primary text-white rounded-lg text-xs font-semibold hover:bg-primary/90 transition shadow-sm">
+                              <Zap size={14} /> Run Single-Criterion Sweep
+                            </button>
+                            {sensitivityResults && (<>
+                              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
+                                {sensitivityResults.map(sr => (
+                                  <div key={sr.criterion.id} className={`rounded-xl p-3.5 border text-xs ${sr.isStable ? 'bg-emerald-50 border-emerald-200' : 'bg-amber-50 border-amber-200'}`}>
+                                    <div className="font-semibold text-slate-700 mb-0.5">{sr.criterion.name}</div>
+                                    <div className="text-slate-500">Current weight: <span className="font-mono font-bold">{sr.currentWeight}</span></div>
+                                    {sr.isStable ? <div className="text-emerald-700 font-semibold mt-1.5">✓ Stable — winner doesn't change</div> : <div className="text-amber-700 font-semibold mt-1.5">⚠ Ranking flips at <span className="font-mono">{sr.breakpoint}%</span> → {sr.breakWinner} wins</div>}
+                                  </div>
+                                ))}
+                              </div>
+                              {sensitivityResults.map(sr => (
+                                <div key={sr.criterion.id} className="bg-slate-50 rounded-xl p-4">
+                                  <div className="flex items-center justify-between mb-2">
+                                    <h4 className="text-xs font-semibold text-slate-700">{sr.criterion.name}</h4>
+                                    {!sr.isStable && <span className="text-[10px] font-mono bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded-full">flip @ {sr.breakpoint}%</span>}
+                                  </div>
+                                  <ResponsiveContainer width="100%" height={190}>
+                                    <LineChart data={sr.sweepData} margin={{ left: 5, right: 5 }}>
+                                      <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" /><XAxis dataKey="weight" tick={{ fontSize: 9 }} /><YAxis tick={{ fontSize: 9 }} domain={[0, 100]} /><Tooltip formatter={v => `${v}%`} labelFormatter={v => `Weight: ${v}%`} /><Legend wrapperStyle={{ fontSize: 10 }} />
+                                      <ReferenceLine x={sr.currentWeight} stroke="#64748b" strokeDasharray="4 4" label={{ value: 'now', fontSize: 9, fill: '#64748b' }} />
+                                      {!sr.isStable && <ReferenceLine x={sr.breakpoint} stroke="#e84040" strokeDasharray="4 4" label={{ value: 'flip', fontSize: 9, fill: '#e84040' }} />}
+                                      {alternatives.map((a, i) => <Line key={a.id} type="monotone" dataKey={a.name} stroke={ALT_COLORS[i % ALT_COLORS.length]} strokeWidth={2} dot={false} />)}
+                                    </LineChart>
+                                  </ResponsiveContainer>
+                                </div>
+                              ))}
+                              <div className="bg-primary/5 border border-primary/15 rounded-xl p-3.5 text-xs">
+                                <strong>Summary:</strong>{' '}
+                                {(() => {
+                                  const st = sensitivityResults.filter(s => s.isStable).length; const tot = sensitivityResults.length; const w = mcda.ranking[0]?.name || '—'; const un = sensitivityResults.filter(s => !s.isStable)
+                                  if (st === tot) return <>{w} is <span className="text-emerald-600 font-semibold">robust</span> — no single criterion flips the ranking.</>
+                                  return <>{w} wins but is <span className="text-amber-600 font-semibold">sensitive</span> to: {un.map((s, i) => <React.Fragment key={s.criterion.id}>{i > 0 && ', '}<strong>{s.criterion.name}</strong> ({s.breakpoint}%)</React.Fragment>)}. Stable in {st}/{tot}.</>
+                                })()}
+                              </div>
+                            </>)}
                           </div>
-                        </>)}
+                        )}
+
+                        {/* ══ TAB 2: Dual Criteria — all pairs ══ */}
+                        {analysisTab === 'dual' && (
+                          <div className="space-y-4">
+                            <p className="text-[11px] text-slate-400">Sweeps <strong>every pair of criteria</strong> simultaneously across all valid weight combinations (step: {sensStep}%). Sorted by robustness — <strong>least robust pair first</strong>.</p>
+                            <button onClick={runAllDualSweeps} disabled={criteria.length < 2}
+                              className="flex items-center gap-2 px-4 py-2 bg-primary text-white rounded-lg text-xs font-semibold hover:bg-primary/90 transition shadow-sm disabled:opacity-40 disabled:cursor-not-allowed">
+                              <Target size={14} /> Run All Pairs ({criteria.length >= 2 ? criteria.length * (criteria.length - 1) / 2 : 0} combinations)
+                            </button>
+
+                            {dualResults && dualResults.length > 0 && (
+                              <div className="space-y-5">
+                                {dualResults.map((dr, di) => (
+                                  <div key={di} className={`rounded-xl p-4 border space-y-3 ${parseFloat(dr.baseWinPct) < 60 ? 'bg-amber-50/50 border-amber-200' : 'bg-slate-50 border-slate-200'}`}>
+                                    <div className="flex items-center justify-between flex-wrap gap-2">
+                                      <h5 className="text-xs font-bold text-slate-800">{dr.crit1.name} × {dr.crit2.name}</h5>
+                                      <div className="flex items-center gap-2">
+                                        <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full font-bold ${
+                                          parseFloat(dr.baseWinPct) >= 80 ? 'bg-emerald-100 text-emerald-700' :
+                                          parseFloat(dr.baseWinPct) >= 50 ? 'bg-amber-100 text-amber-700' :
+                                          'bg-red-100 text-red-700'
+                                        }`}>{dr.baseWinner} {dr.baseWinPct}%</span>
+                                        {parseFloat(dr.flipPct) > 0 && <span className="text-[10px] font-mono text-red-500">⚠ {dr.flipPct}% flips</span>}
+                                      </div>
+                                    </div>
+                                    {/* Mini heatmap */}
+                                    <div className="flex gap-2">
+                                      <div>
+                                        <div style={{ display: 'grid', gridTemplateColumns: `repeat(${dr.steps}, minmax(8px, 14px))`, gap: '1px' }}>
+                                          {Array.from({ length: dr.steps }).reverse().map((_, ryi) => {
+                                            const w2 = (dr.steps - 1 - ryi) * dr.step
+                                            return Array.from({ length: dr.steps }).map((_, xi) => {
+                                              const w1 = xi * dr.step
+                                              const cell = dr.grid.find(g => g.w1 === w1 && g.w2 === w2)
+                                              if (!cell || !cell.winnerId) return <div key={`${w1}_${w2}`} className="aspect-square rounded-[1px] bg-slate-200/50" />
+                                              const altIdx = alternatives.findIndex(a => a.id === cell.winnerId)
+                                              const isCurrent = Math.abs(w1 - dr.currentW1) < dr.step && Math.abs(w2 - dr.currentW2) < dr.step
+                                              return <div key={`${w1}_${w2}`} className={`aspect-square rounded-[1px] ${isCurrent ? 'ring-1 ring-slate-800 z-10' : ''}`} style={{ backgroundColor: ALT_COLORS[altIdx % ALT_COLORS.length] }} title={`${dr.crit1.name}: ${w1}% / ${dr.crit2.name}: ${w2}% → ${cell.winnerName}`} />
+                                            })
+                                          })}
+                                        </div>
+                                        <div className="text-[8px] text-slate-400 text-center mt-0.5">{dr.crit1.name}</div>
+                                      </div>
+                                      <div className="flex items-center">
+                                        <span className="text-[8px] text-slate-400" style={{ writingMode: 'vertical-rl', transform: 'rotate(180deg)' }}>{dr.crit2.name}</span>
+                                      </div>
+                                      <div className="flex-1 space-y-1 min-w-0">
+                                        {dr.winFrequency.filter(w => w.count > 0).map(w => (
+                                          <div key={w.id} className="flex items-center gap-1.5">
+                                            <div className="w-2.5 h-2.5 rounded-sm shrink-0" style={{ backgroundColor: ALT_COLORS[alternatives.findIndex(a => a.id === w.id) % ALT_COLORS.length] }} />
+                                            <span className="text-[10px] font-medium text-slate-700 truncate">{w.name}</span>
+                                            <span className="text-[10px] font-mono text-slate-400 ml-auto shrink-0">{w.pct.toFixed(1)}%</span>
+                                          </div>
+                                        ))}
+                                        <div className="text-[9px] text-slate-400 mt-1">{dr.totalCells} valid cells</div>
+                                      </div>
+                                    </div>
+                                  </div>
+                                ))}
+                                <div className="bg-blue-50 border border-blue-100 rounded-lg p-2 text-[10px] text-blue-600 flex items-start gap-1.5">
+                                  <Info size={11} className="shrink-0 mt-0.5" />
+                                  <span><strong>Method:</strong> Exhaustive grid sweep over every criterion pair with step size {sensStep}%. Remaining weight distributed proportionally. Sorted by base winner's dominance (ascending = least robust first).</span>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        {/* ══ TAB 3: All Criteria — exhaustive combinations ══ */}
+                        {analysisTab === 'all' && (
+                          <div className="space-y-4">
+                            <p className="text-[11px] text-slate-400">
+                              Exhaustively sweeps <strong>all possible criterion combinations</strong> (pairs, triples, quads, …) at step size {sensStep}%.
+                              Combinations with <strong>ranking changes are shown first</strong>.
+                            </p>
+                            <button onClick={startAllCritSweep} disabled={criteria.length < 2 || allCritRunning}
+                              className="flex items-center gap-2 px-4 py-2 bg-primary text-white rounded-lg text-xs font-semibold hover:bg-primary/90 transition shadow-sm disabled:opacity-40 disabled:cursor-not-allowed">
+                              <Zap size={14} /> {allCritRunning ? 'Running…' : `Run All Combinations (${criteria.length >= 2 ? (() => { let t = 0; for (let k = 2; k <= criteria.length; k++) t += getCombinations(criteria.map(c => c.id), k).length; return t })() : 0} combos)`}
+                            </button>
+
+                            {allCritProgress && (
+                              <div className="flex items-center gap-2">
+                                <div className="flex-1 bg-slate-200 rounded-full h-1.5 overflow-hidden">
+                                  <div className="h-full bg-primary rounded-full transition-all duration-300" style={{ width: `${(allCritProgress.done / allCritProgress.total) * 100}%` }} />
+                                </div>
+                                <span className="text-[10px] font-mono text-slate-400">{allCritProgress.done} / {allCritProgress.total}</span>
+                              </div>
+                            )}
+
+                            {allCritResults && allCritResults.length > 0 && (
+                              <div className="space-y-2">
+                                {allCritResults.map((cr, ci) => (
+                                  <div key={ci} className={`rounded-xl p-3 border text-xs flex items-center gap-3 ${
+                                    parseFloat(cr.flipPct) > 20 ? 'bg-red-50 border-red-200' :
+                                    parseFloat(cr.flipPct) > 0 ? 'bg-amber-50 border-amber-200' :
+                                    'bg-emerald-50 border-emerald-200'
+                                  }`}>
+                                    <div className="shrink-0">
+                                      <span className={`inline-flex items-center justify-center w-6 h-6 rounded-full text-[9px] font-bold ${
+                                        cr.k === 2 ? 'bg-blue-100 text-blue-700' :
+                                        cr.k === 3 ? 'bg-purple-100 text-purple-700' :
+                                        cr.k === 4 ? 'bg-orange-100 text-orange-700' :
+                                        'bg-slate-100 text-slate-700'
+                                      }`}>{cr.k}</span>
+                                    </div>
+                                    <div className="flex-1 min-w-0">
+                                      <div className="font-semibold text-slate-700 truncate">{cr.selectedNames.join(' × ')}</div>
+                                      <div className="text-slate-500">{cr.totalCells.toLocaleString()} evaluations</div>
+                                    </div>
+                                    <div className="shrink-0 text-right">
+                                      <div className={`font-mono font-bold ${parseFloat(cr.flipPct) > 0 ? 'text-amber-700' : 'text-emerald-700'}`}>
+                                        {parseFloat(cr.flipPct) > 0 ? `⚠ ${cr.flipPct}% flips` : '✓ stable'}
+                                      </div>
+                                      <div className="text-slate-400 font-mono">{cr.baseWinner} {cr.baseWinPct}%</div>
+                                    </div>
+                                    <div className="shrink-0 w-24">
+                                      <div className="bg-slate-200 rounded-full h-3 overflow-hidden">
+                                        {cr.winFrequency.slice(0, 3).map((w, wi) => (
+                                          <div key={w.id} className="h-full float-left" style={{ width: `${w.pct}%`, backgroundColor: ALT_COLORS[alternatives.findIndex(a => a.id === w.id) % ALT_COLORS.length] }} />
+                                        ))}
+                                      </div>
+                                    </div>
+                                  </div>
+                                ))}
+
+                                {!allCritRunning && (
+                                  <div className="bg-blue-50 border border-blue-100 rounded-lg p-2 text-[10px] text-blue-600 flex items-start gap-1.5 mt-3">
+                                    <Info size={11} className="shrink-0 mt-0.5" />
+                                    <span><strong>Method:</strong> Exhaustive grid sweep for every possible criterion combination (C(n,k) for k=2..n) at step size {sensStep}%. For each combination, unselected criteria maintain their proportional weights. Sorted by base winner dominance (ascending = most volatile first). Badge shows combination size (2=pair, 3=triple, etc.).</span>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        {/* ══ TAB 4: Monte Carlo (nD) ══ */}
+                        {analysisTab === 'mc' && (
+                          <div className="space-y-4">
+                            <p className="text-[11px] text-slate-400">
+                              Randomly samples <strong>{mcSimCount.toLocaleString()}</strong> weight vectors using Dirichlet-uniform distribution.
+                              Select which criteria to vary — unselected criteria maintain their relative proportions.
+                            </p>
+
+                            <div className="flex flex-wrap gap-2">
+                              {criteria.map(c => {
+                                const checked = multiSensSelected[c.id] !== false
+                                return (
+                                  <label key={c.id} className={`flex items-center gap-1.5 text-[11px] cursor-pointer px-2 py-1 rounded-lg border transition ${checked ? 'bg-primary/10 border-primary/30 text-primary font-semibold' : 'bg-slate-50 border-slate-200 text-slate-400'}`}>
+                                    <input type="checkbox" checked={checked} onChange={() => setMultiSensSelected(p => ({ ...p, [c.id]: !checked }))} className="accent-primary w-3 h-3" />
+                                    {c.name || '—'}
+                                  </label>
+                                )
+                              })}
+                            </div>
+
+                            <div className="flex items-center gap-2">
+                              {!mcRunning ? (
+                                <button
+                                  onClick={startMonteCarlo}
+                                  disabled={criteria.filter(c => multiSensSelected[c.id] !== false).length < 2}
+                                  className="flex items-center gap-2 px-4 py-2 bg-primary text-white rounded-lg text-xs font-semibold hover:bg-primary/90 transition shadow-sm disabled:opacity-40 disabled:cursor-not-allowed"
+                                >
+                                  <Shuffle size={14} /> Run Monte Carlo ({criteria.filter(c => multiSensSelected[c.id] !== false).length} criteria, {mcSimCount.toLocaleString()} sims)
+                                </button>
+                              ) : (
+                                <button
+                                  onClick={() => { mcAbortRef.current = true }}
+                                  className="flex items-center gap-2 px-4 py-2 bg-red-500 text-white rounded-lg text-xs font-semibold hover:bg-red-600 transition shadow-sm"
+                                >
+                                  <X size={14} /> Stop
+                                </button>
+                              )}
+                              {mcRunning && multiSensResults && (
+                                <span className="text-[11px] font-mono text-slate-400">{multiSensResults.simulations.toLocaleString()} / {multiSensResults.totalPlanned.toLocaleString()}</span>
+                              )}
+                            </div>
+
+                            {multiSensResults && (
+                              <div className="space-y-3">
+                                {/* Progress bar during run */}
+                                {mcRunning && (
+                                  <div className="bg-slate-200 rounded-full h-1.5 overflow-hidden">
+                                    <div className="h-full bg-primary rounded-full transition-all duration-300" style={{ width: `${(multiSensResults.simulations / multiSensResults.totalPlanned) * 100}%` }} />
+                                  </div>
+                                )}
+
+                                {/* Live win probability bars */}
+                                <div className="bg-slate-50 rounded-xl p-4">
+                                  <h5 className="text-xs font-semibold text-slate-700 mb-3">
+                                    Win Probability — {multiSensResults.simulations.toLocaleString()}{mcRunning ? '' : ` of ${multiSensResults.totalPlanned.toLocaleString()}`} simulations ({multiSensResults.selectedCount}/{multiSensResults.totalCriteria} criteria varied)
+                                  </h5>
+                                  <div className="space-y-2">
+                                    {multiSensResults.winFrequency.map((w, i) => (
+                                      <div key={w.id} className="flex items-center gap-2">
+                                        <span className="text-[11px] w-28 truncate font-medium text-slate-700">{w.name}</span>
+                                        <div className="flex-1 bg-slate-200 rounded-full h-5 overflow-hidden relative">
+                                          <div className="h-full rounded-full transition-all duration-300" style={{ width: `${w.pct}%`, backgroundColor: ALT_COLORS[i % ALT_COLORS.length] }} />
+                                          {w.pct > 4 && <span className="absolute inset-0 flex items-center justify-center text-[10px] font-bold text-white drop-shadow-sm">{w.pct.toFixed(1)}%</span>}
+                                        </div>
+                                        <span className="text-[10px] font-mono text-slate-400 w-12 text-right">{w.pct.toFixed(1)}%</span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+
+                                {/* Current leader highlight */}
+                                {multiSensResults.winFrequency[0] && (
+                                  <div className={`rounded-xl p-3 border text-xs ${
+                                    parseFloat(multiSensResults.baseWinPct) >= 80 ? 'bg-emerald-50 border-emerald-200' :
+                                    parseFloat(multiSensResults.baseWinPct) >= 50 ? 'bg-amber-50 border-amber-200' :
+                                    'bg-red-50 border-red-200'
+                                  }`}>
+                                    <strong>Current result ({mcda.ranking[0]?.name}):</strong> wins in <span className="font-mono font-bold">{multiSensResults.baseWinPct}%</span> of simulations.
+                                    {' '}<strong>Most likely winner:</strong> <span className="font-mono font-bold">{multiSensResults.winFrequency[0].name}</span> ({multiSensResults.winFrequency[0].pct.toFixed(1)}%).
+                                    {parseFloat(multiSensResults.baseWinPct) >= 80 && <span className="ml-1 text-emerald-700 font-semibold">Very robust.</span>}
+                                    {parseFloat(multiSensResults.baseWinPct) >= 50 && parseFloat(multiSensResults.baseWinPct) < 80 && <span className="ml-1 text-amber-700 font-semibold">Moderately robust — sensitive to weight assumptions.</span>}
+                                    {parseFloat(multiSensResults.baseWinPct) < 50 && <span className="ml-1 text-red-700 font-semibold">Not robust — ranking highly dependent on weight assumptions.</span>}
+                                  </div>
+                                )}
+
+                                {!mcRunning && (
+                                  <div className="bg-blue-50 border border-blue-100 rounded-lg p-2 text-[10px] text-blue-600 flex items-start gap-1.5">
+                                    <Info size={11} className="shrink-0 mt-0.5" />
+                                    <span><strong>Method:</strong> Dirichlet-uniform sampling on the weight simplex. Each simulation draws a random weight vector. Selected criteria receive random shares; unselected criteria maintain their relative proportions. {multiSensResults.simulations.toLocaleString()} total evaluations.</span>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        )}
                       </div>
                     )}
 
@@ -836,6 +1481,85 @@ export default function App() {
           )
         })}
       </main>
+
+      {/* ━━━ Footer ━━━ */}
+      <div className="h-10" /> {/* spacer for fixed footer */}
+      <footer className="fixed bottom-0 left-0 right-0 z-40 border-t border-slate-200 bg-white/95 backdrop-blur py-2.5 text-center text-xs text-slate-400 shadow-[0_-2px_8px_rgba(0,0,0,0.04)]">
+        Provided by <strong className="text-slate-600">Dr. Sven-Erik Willrich</strong> · <a href="mailto:mail@svenwillrich.de" className="hover:text-primary transition">mail@svenwillrich.de</a>
+      </footer>
+
+      {/* ═══ PCS Research & Methodology Modal ═══ */}
+      {showPcsInfo && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={() => setShowPcsInfo(false)}>
+          <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full mx-4 max-h-[85vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+            <div className="sticky top-0 bg-white rounded-t-2xl border-b border-slate-100 p-4 flex items-center justify-between z-10">
+              <h3 className="text-sm font-bold text-slate-800">PC Simplified — Research & Methodology</h3>
+              <button onClick={() => setShowPcsInfo(false)} className="p-1 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition"><X size={16} /></button>
+            </div>
+            <div className="p-4 space-y-4 text-xs text-slate-700 leading-relaxed">
+              <div>
+                <h4 className="font-bold text-slate-800 text-[13px] mb-1">Method</h4>
+                <p>
+                  PC Simplified (PCS) uses only <strong>n−1 adjacent pairwise comparisons</strong> instead
+                  of the full n(n−1)/2 required by traditional AHP. The n−1 comparisons form a path along
+                  the superdiagonal of the comparison matrix — called <em>PC principal generators</em>.
+                  The complete matrix is reconstructed via <strong>transitivity</strong> (a<sub>ik</sub> = a<sub>ij</sub> · a<sub>jk</sub>)
+                  and <strong>reciprocity</strong> (a<sub>ji</sub> = 1/a<sub>ij</sub>).
+                  Weights are derived using the <strong>geometric mean</strong> method.
+                </p>
+              </div>
+
+              <div>
+                <h4 className="font-bold text-slate-800 text-[13px] mb-1">Key Properties</h4>
+                <ul className="list-disc pl-4 space-y-1">
+                  <li>Reduces comparisons dramatically: e.g., 5 criteria → <strong>4</strong> instead of 10; 10 criteria → <strong>9</strong> instead of 45</li>
+                  <li>Always produces a <strong>perfectly consistent</strong> matrix (consistency index = 0)</li>
+                  <li>Significantly lower cognitive load for participants</li>
+                  <li>Deterministic — same inputs always yield same weights</li>
+                </ul>
+              </div>
+
+              <div>
+                <h4 className="font-bold text-emerald-700 text-[13px] mb-1">✓ Research Findings (Dr. Sven-Erik Willrich, KIT 2021)</h4>
+                <p>
+                  In his doctoral dissertation at the Karlsruhe Institute of Technology (KIT), Dr. Sven-Erik Willrich
+                  designed, implemented, and empirically evaluated PCS as a practical simplification of full AHP
+                  in a participatory multi-criteria decision-making context for urban common-good decisions.
+                  A study with over 150 participants demonstrated that <strong>PCS works as a viable replacement
+                  for full pairwise comparison</strong>:
+                </p>
+                <ul className="list-disc pl-4 space-y-1 mt-2">
+                  <li>PCS produces <strong>comparable decision outcomes</strong> to full AHP — the final rankings and weight distributions closely matched those derived from the complete n(n−1)/2 comparisons</li>
+                  <li>Participants found PCS significantly <strong>easier and faster</strong> to complete, with average completion times reduced by over 60%</li>
+                  <li>The reduced cognitive burden led to <strong>higher completion rates</strong> and fewer abandoned questionnaires</li>
+                  <li>Decision quality (measured by consistency and outcome stability) was <strong>not significantly degraded</strong> compared to full AHP</li>
+                  <li>PCS is particularly well-suited for <strong>participatory and citizen-engagement settings</strong> where cognitive load must be minimized to ensure broad participation</li>
+                </ul>
+                <p className="mt-2 text-slate-500 italic">
+                  "The simplified pairwise comparison method proved to be a practical and scientifically sound alternative,
+                  enabling wider participation without sacrificing decision quality." — Willrich (2021)
+                </p>
+              </div>
+
+              <div>
+                <h4 className="font-bold text-amber-700 text-[13px] mb-1">⚠ Limitations</h4>
+                <ul className="list-disc pl-4 space-y-1">
+                  <li><strong>Order-dependent:</strong> Results depend on criterion ordering — different orderings produce different adjacent pairs and potentially different weights</li>
+                  <li><strong>No inconsistency detection:</strong> Since the matrix is always consistent by construction, inconsistencies in human judgment cannot be identified</li>
+                  <li><strong>Information loss:</strong> Captures less preference information than full pairwise comparison (only path, not all relationships)</li>
+                  <li><strong>Transitivity assumption:</strong> Assumes human preferences are perfectly transitive, which is not always the case</li>
+                </ul>
+              </div>
+
+              <div className="bg-slate-50 rounded-xl p-3 text-[10px] text-slate-500 space-y-1.5">
+                <p className="font-bold text-slate-600">References</p>
+                <p>Koczkodaj, W. W. & Szybowski, J. (2015). <em>Pairwise comparisons simplified.</em> Applied Mathematics and Computation, 253, 387–394.</p>
+                <p>Willrich, S.-E. (2021). <em>Participatory Multi-Criteria Decision-Making for Common Goods.</em> Doctoral dissertation, Karlsruhe Institute of Technology (KIT).</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

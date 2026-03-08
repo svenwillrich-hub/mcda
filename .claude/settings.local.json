@@ -8,7 +8,12 @@
       "Bash(curl -s http://localhost:8888/)",
       "Bash(docker-compose logs --tail 8)",
       "Bash(docker-compose logs --tail 5)",
-      "Bash(docker-compose logs --tail 3)"
+      "Bash(docker-compose logs --tail 3)",
+      "mcp__PDF_Tools_-_Analyze__Extract__Fill__Compare__read_pdf_content",
+      "Bash(python3 -c \":*)",
+      "Bash(docker-compose logs --tail=10)",
+      "Bash(npx vite build --mode development)",
+      "Bash(powershell -Command \"\\(Get-Item ''C:\\\\Users\\\\svenw\\\\OneDrive\\\\9_Projects\\\\mcda\\\\src\\\\App.jsx''\\).LastWriteTime = Get-Date\")"
     ]
   }
 }
