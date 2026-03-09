@@ -22,7 +22,8 @@
       "Bash(npm run build)",
       "Bash(npx vite build)",
       "Bash(npm install)",
-      "mcp__Claude_Preview__preview_start"
+      "mcp__Claude_Preview__preview_start",
+      "Bash(ls C:/Users/svenw/OneDrive/9_Projects/mcda/node_modules/.bin/vite*)"
     ]
   }
 }

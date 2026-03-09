@@ -12,18 +12,113 @@ import {
 
 // ─── Constants ──────────────────────────────────────────────────────────────────
 const SECTIONS = [
-  { id: 'problem', label: 'Problem', num: 1 },
-  { id: 'criteria', label: 'Criteria', num: 2 },
-  { id: 'weights', label: 'Weights', num: 3 },
-  { id: 'alternatives', label: 'Alternatives', num: 4 },
-  { id: 'scoring', label: 'Scoring', num: 5 },
-  { id: 'results', label: 'Results', num: 6 },
-  { id: 'analysis', label: 'Analysis', num: 7 },
+  { id: 'problem', label: 'Problem', num: 1, desc: 'Define the decision problem and title' },
+  { id: 'criteria', label: 'Criteria', num: 2, desc: 'Set evaluation criteria with direction (max/min)' },
+  { id: 'weights', label: 'Weights', num: 3, desc: 'Assign relative importance via 4 elicitation methods' },
+  { id: 'alternatives', label: 'Alternatives', num: 4, desc: 'Add the options you are comparing' },
+  { id: 'scoring', label: 'Scoring', num: 5, desc: 'Rate each alternative on every criterion' },
+  { id: 'results', label: 'Results', num: 6, desc: 'View rankings and part-worth decomposition' },
+  { id: 'analysis', label: 'Analysis', num: 7, desc: 'Sensitivity analysis: OAT, dual, MC simulation' },
 ]
 const ALT_COLORS = ['#4f6ef7', '#00b4b4', '#f59e0b', '#e84040', '#8b5cf6', '#ec4899', '#10b981', '#6366f1']
 const RANK_COLORS = ['#FFD700', '#C0C0C0', '#CD7F32']
 let _id = 200
 const uid = (p) => `${p}${++_id}`
+const LIKERT = [
+  { value: 1, label: 'Not important' }, { value: 2, label: 'Slightly important' },
+  { value: 3, label: 'Moderately important' }, { value: 4, label: 'Important' },
+  { value: 5, label: 'Very important' }, { value: 6, label: 'Critical' },
+]
+
+// ─── AHP Shared Engine (Saaty 1980 / Crawford 1987 / Alonso & Lamata 2006) ──
+// Random Index table (Alonso & Lamata, 2006) — RI for n=1..10
+const RI_TABLE = [0, 0, 0, 0.5247, 0.8816, 1.1086, 1.2479, 1.3417, 1.4057, 1.4499, 1.4854]
+
+/**
+ * Build a pairwise comparison matrix from criteria and answer objects.
+ * @param {'full'|'pcs'} mode - 'full' for AHP n(n-1)/2, 'pcs' for n-1 adjacent
+ */
+function buildPCMatrix(criteria, answers, mode = 'full') {
+  const n = criteria.length
+  const matrix = Array.from({ length: n }, () => Array(n).fill(1))
+  if (mode === 'full') {
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        const key = `${criteria[i].id}_${criteria[j].id}`
+        const ans = answers[key] || 1
+        matrix[i][j] = ans > 0 ? ans : 1 / Math.abs(ans)
+        matrix[j][i] = 1 / matrix[i][j]
+      }
+    }
+  } else {
+    // PCS: fill superdiagonal, then transitivity
+    for (let i = 0; i < n - 1; i++) {
+      const key = `${criteria[i].id}_${criteria[i + 1].id}`
+      const ans = answers[key] || 1
+      matrix[i][i + 1] = ans > 0 ? ans : 1 / Math.abs(ans)
+    }
+    for (let i = 0; i < n - 1; i++) for (let l = i + 2; l < n; l++) { let p = 1; for (let j = i; j < l; j++) p *= matrix[j][j + 1]; matrix[i][l] = p }
+    for (let i = 0; i < n; i++) for (let l = i + 1; l < n; l++) matrix[l][i] = 1 / matrix[i][l]
+  }
+  return matrix
+}
+
+/** Geometric Mean method (Crawford 1987, Eq. 3.6) */
+function weightsGeometricMean(matrix) {
+  const n = matrix.length
+  const gm = []
+  for (let i = 0; i < n; i++) {
+    let product = 1
+    for (let j = 0; j < n; j++) product *= matrix[i][j]
+    gm.push(Math.pow(product, 1 / n))
+  }
+  const total = gm.reduce((s, v) => s + v, 0)
+  return gm.map(v => total > 0 ? v / total : 0)
+}
+
+/** Eigenvector approximation via column normalization (Saaty, Eq. 3.5) */
+function weightsEigenvector(matrix) {
+  const n = matrix.length
+  const colSums = Array(n).fill(0)
+  for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) colSums[j] += matrix[i][j]
+  const w = Array(n).fill(0)
+  for (let i = 0; i < n; i++) { for (let j = 0; j < n; j++) w[i] += matrix[i][j] / (colSums[j] || 1); w[i] /= n }
+  return w
+}
+
+/** Compute λ_max from matrix and weight vector */
+function computeLambdaMax(matrix, weights) {
+  const n = matrix.length
+  // Aw = λ_max * w → λ_max ≈ mean of (Aw)_i / w_i
+  let sum = 0
+  for (let i = 0; i < n; i++) {
+    let aw = 0
+    for (let j = 0; j < n; j++) aw += matrix[i][j] * weights[j]
+    if (weights[i] > 0) sum += aw / weights[i]
+  }
+  return sum / n
+}
+
+/** Consistency Index and Ratio */
+function computeConsistency(matrix, weights) {
+  const n = matrix.length
+  if (n <= 2) return { lambdaMax: n, ci: 0, cr: 0, consistent: true }
+  const lambdaMax = computeLambdaMax(matrix, weights)
+  const ci = (lambdaMax - n) / (n - 1)
+  const ri = n <= 10 ? (RI_TABLE[n] || 0) : 1.49 // fallback for n>10
+  const cr = ri > 0 ? ci / ri : 0
+  return { lambdaMax, ci, cr, consistent: cr <= 0.1 }
+}
+
+/** Full AHP pipeline: build matrix → compute weights → CI/CR */
+function computeAHP(criteria, answers, mode = 'full', method = 'eigenvector') {
+  const n = criteria.length
+  if (n < 2) return { weights: criteria.map(() => 0), matrix: [], consistency: { lambdaMax: 0, ci: 0, cr: 0, consistent: true } }
+  const matrix = buildPCMatrix(criteria, answers, mode)
+  const w = method === 'geometric' ? weightsGeometricMean(matrix) : weightsEigenvector(matrix)
+  const consistency = computeConsistency(matrix, w)
+  return { weights: w, matrix, consistency }
+}
 
 // ─── Examples ───────────────────────────────────────────────────────────────────
 const EXAMPLES = {
@@ -77,7 +172,7 @@ const EXAMPLES = {
 
 // ─── MCDA Engine ────────────────────────────────────────────────────────────────
 function computeMCDA(criteria, alternatives, scores, weightOverrides = null) {
-  if (!criteria.length || !alternatives.length) return { ranking: [], normalized: {}, utilities: {}, partWorths: {}, weights: {} }
+  if (!criteria.length || !alternatives.length) return { ranking: [], normalized: {}, utilities: {}, partWorths: {}, weights: {}, koFails: {} }
   const rawW = {}; let totalW = 0
   criteria.forEach(c => { const w = weightOverrides ? (weightOverrides[c.id] ?? c.weight) : c.weight; rawW[c.id] = w; totalW += w })
   const weights = {}; criteria.forEach(c => { weights[c.id] = totalW > 0 ? rawW[c.id] / totalW : 0 })
@@ -86,14 +181,33 @@ function computeMCDA(criteria, alternatives, scores, weightOverrides = null) {
     const vals = alternatives.map(a => Number(scores[a.id]?.[c.id]) || 0)
     mm[c.id] = { min: Math.min(...vals), max: Math.max(...vals), range: Math.max(...vals) - Math.min(...vals) || 1 }
   })
+  // K.O. check
+  const koFails = {}
+  alternatives.forEach(a => {
+    const fails = []
+    criteria.forEach(c => {
+      if (c.ko && c.koValue !== '' && c.koValue !== undefined) {
+        const val = Number(scores[a.id]?.[c.id]) || 0
+        const threshold = Number(c.koValue)
+        if (c.koDirection === 'min' && val < threshold) fails.push({ criterion: c.name, value: val, threshold, direction: 'min' })
+        if (c.koDirection === 'max' && val > threshold) fails.push({ criterion: c.name, value: val, threshold, direction: 'max' })
+      }
+    })
+    if (fails.length > 0) koFails[a.id] = fails
+  })
   alternatives.forEach(a => {
     normalized[a.id] = {}
     criteria.forEach(c => { const n = (Number(scores[a.id]?.[c.id] || 0) - mm[c.id].min) / mm[c.id].range; normalized[a.id][c.id] = c.direction === 'minimize' ? 1 - n : n })
   })
   const partWorths = {}; const utilities = {}
   alternatives.forEach(a => { partWorths[a.id] = {}; let t = 0; criteria.forEach(c => { const pw = normalized[a.id][c.id] * weights[c.id]; partWorths[a.id][c.id] = pw; t += pw }); utilities[a.id] = t })
-  const ranking = alternatives.map(a => ({ id: a.id, name: a.name, utility: utilities[a.id], partWorths: partWorths[a.id], normalized: normalized[a.id] })).sort((a, b) => b.utility - a.utility)
-  return { ranking, normalized, utilities, partWorths, weights }
+  const ranking = alternatives.map(a => ({ id: a.id, name: a.name, utility: utilities[a.id], partWorths: partWorths[a.id], normalized: normalized[a.id], koFailed: !!koFails[a.id] })).sort((a, b) => {
+    // K.O. failed alternatives always rank last
+    if (a.koFailed && !b.koFailed) return 1
+    if (!a.koFailed && b.koFailed) return -1
+    return b.utility - a.utility
+  })
+  return { ranking, normalized, utilities, partWorths, weights, koFails }
 }
 
 function runFullSensitivity(criteria, alternatives, scores) {
@@ -230,11 +344,6 @@ function runCombinationSweep(criteria, alternatives, scores, selectedIds, step =
   }
 }
 
-const LIKERT = [
-  { value: 1, label: 'Not important' }, { value: 2, label: 'Slightly' }, { value: 3, label: 'Moderate' },
-  { value: 4, label: 'Important' }, { value: 5, label: 'Very important' }, { value: 6, label: 'Critical' },
-]
-
 // ─── Stepper Input Component ────────────────────────────────────────────────────
 function StepperInput({ value, onChange, step = 1, min, max }) {
   const v = value === '' || value === undefined || value === null ? '' : value
@@ -279,6 +388,7 @@ export default function App() {
   const [pairAnswers, setPairAnswers] = useState({})
   const [pcsAnswers, setPcsAnswers] = useState({})
   const [resetConfirm, setResetConfirm] = useState(null) // null | 'likert' | 'pairwise' | 'pcs'
+  const [ahpMethod, setAhpMethod] = useState('eigenvector') // 'eigenvector' | 'geometric'
   const [showPcsInfo, setShowPcsInfo] = useState(false)
   const [multiSensSelected, setMultiSensSelected] = useState({})
   const [multiSensResults, setMultiSensResults] = useState(null)
@@ -294,6 +404,14 @@ export default function App() {
   const [showPartWorths, setShowPartWorths] = useState(false)
   const [expandedDualPairs, setExpandedDualPairs] = useState({})
   const [showAbout, setShowAbout] = useState(false)
+  const [showPrefLab, setShowPrefLab] = useState(false)
+  // Preference Lab — independent criteria weighting
+  const [plCriteria, setPlCriteria] = useState([])
+  const [plMethod, setPlMethod] = useState('direct')
+  const [plLikertRatings, setPlLikertRatings] = useState({})
+  const [plPairAnswers, setPlPairAnswers] = useState({})
+  const [plPcsAnswers, setPlPcsAnswers] = useState({})
+  const [plStep, setPlStep] = useState('criteria') // 'criteria' | 'rate' | 'results'
   const exRef = useRef(null)
   const sectionRefs = useRef({})
 
@@ -360,7 +478,7 @@ export default function App() {
   }, [])
 
   // ─── Criteria CRUD ──────────────────────────────────────────────────────────
-  const addCriterion = () => setCriteria(p => [...p, { id: uid('c'), name: '', direction: 'maximize', weight: 0 }])
+  const addCriterion = () => setCriteria(p => [...p, { id: uid('c'), name: '', direction: 'maximize', weight: 0, ko: false, koDirection: 'min', koValue: '' }])
   const updateCriterion = (id, f, v) => setCriteria(p => p.map(c => c.id === id ? { ...c, [f]: v } : c))
   const removeCriterion = (id) => { setCriteria(p => p.filter(c => c.id !== id)); setScores(p => { const n = { ...p }; Object.keys(n).forEach(a => { const { [id]: _, ...r } = n[a]; n[a] = r }); return n }) }
 
@@ -389,33 +507,18 @@ export default function App() {
     return pairs
   }, [criteria])
 
-  const applyPairwiseWeights = (answers) => {
-    const n = criteria.length
-    if (n < 2) return
-    // Build AHP matrix
-    const matrix = Array.from({ length: n }, () => Array(n).fill(1))
-    for (let i = 0; i < n; i++) {
-      for (let j = i + 1; j < n; j++) {
-        const key = `${criteria[i].id}_${criteria[j].id}`
-        const ans = answers[key] // positive = i preferred, negative = j preferred
-        const val = ans || 1
-        matrix[i][j] = val > 0 ? val : 1 / Math.abs(val)
-        matrix[j][i] = 1 / matrix[i][j]
-      }
-    }
-    // Compute eigenvector approximation (column normalization)
-    const colSums = Array(n).fill(0)
-    for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) colSums[j] += matrix[i][j]
-    const weights = Array(n).fill(0)
-    for (let i = 0; i < n; i++) {
-      for (let j = 0; j < n; j++) weights[i] += matrix[i][j] / (colSums[j] || 1)
-      weights[i] /= n
-    }
-    setCriteria(prev => prev.map((c, i) => ({ ...c, weight: Math.round(weights[i] * 100) })))
+  const applyPairwiseWeights = (answers, method) => {
+    const m = method || ahpMethod
+    const { weights: w } = computeAHP(criteria, answers, 'full', m)
+    setCriteria(prev => prev.map((c, i) => ({ ...c, weight: Math.round(w[i] * 100) })))
   }
 
-  // PCS: Pairwise Comparison Simplified (Koczkodaj & Szybowski 2015)
-  // Only n−1 adjacent pairs (PC principal generators) → always consistent
+  // Computed AHP result for pairwise (for CI/CR display)
+  const pairwiseResult = useMemo(() => {
+    if (weightMethod !== 'pairwise' || criteria.length < 2) return null
+    return computeAHP(criteria, pairAnswers, 'full', ahpMethod)
+  }, [criteria, pairAnswers, weightMethod, ahpMethod])
+
   const pcsAdjacentPairs = useMemo(() => {
     const pairs = []
     for (let i = 0; i < criteria.length - 1; i++) {
@@ -424,39 +527,45 @@ export default function App() {
     return pairs
   }, [criteria])
 
-  const applyPCSWeights = (answers) => {
+  const applyPCSWeights = (answers, method) => {
+    const m = method || ahpMethod
+    const { weights: w } = computeAHP(criteria, answers, 'pcs', m)
+    setCriteria(prev => prev.map((c, i) => ({ ...c, weight: Math.round(w[i] * 100) })))
+  }
+
+  // Computed AHP result for PCS (for CI/CR display)
+  const pcsResult = useMemo(() => {
+    if (weightMethod !== 'pcs' || criteria.length < 2) return null
+    return computeAHP(criteria, pcsAnswers, 'pcs', ahpMethod)
+  }, [criteria, pcsAnswers, weightMethod, ahpMethod])
+
+  // PCS transitivity visualization for main weights panel
+  const pcsTransitivityData = useMemo(() => {
     const n = criteria.length
-    if (n < 2) return
-    // Build n×n matrix from n−1 adjacent pair judgments
-    const matrix = Array.from({ length: n }, () => Array(n).fill(1))
-    // Step 1: Fill superdiagonal from answers
-    for (let i = 0; i < n - 1; i++) {
-      const key = `${criteria[i].id}_${criteria[i + 1].id}`
-      const ans = answers[key] || 1
-      matrix[i][i + 1] = ans > 0 ? ans : 1 / Math.abs(ans)
-    }
-    // Step 2: Fill rest via transitivity — m[i][l] = ∏ m[j][j+1] for j=i..l−1
-    for (let i = 0; i < n - 1; i++) {
-      for (let l = i + 2; l < n; l++) {
-        let product = 1
-        for (let j = i; j < l; j++) product *= matrix[j][j + 1]
-        matrix[i][l] = product
+    if (n < 2 || weightMethod !== 'pcs') return null
+    const { matrix } = computeAHP(criteria, pcsAnswers, 'pcs', ahpMethod)
+    const distances = []
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        distances.push({ from: i, to: j, fromName: criteria[i].name || `C${i+1}`, toName: criteria[j].name || `C${j+1}`, ratio: matrix[i][j], distance: Math.abs(Math.log(matrix[i][j] || 1)), isAdjacent: j === i + 1 })
       }
     }
-    // Step 3: Fill lower triangle via reciprocity — m[l][i] = 1/m[i][l]
-    for (let i = 0; i < n; i++) {
-      for (let l = i + 1; l < n; l++) matrix[l][i] = 1 / matrix[i][l]
-    }
-    // Step 4: Geometric mean of each row → normalize → weights
-    const geoMeans = []
-    for (let i = 0; i < n; i++) {
-      let product = 1
-      for (let j = 0; j < n; j++) product *= matrix[i][j]
-      geoMeans.push(Math.pow(product, 1 / n))
-    }
-    const total = geoMeans.reduce((s, v) => s + v, 0)
-    setCriteria(prev => prev.map((c, i) => ({ ...c, weight: total > 0 ? Math.round((geoMeans[i] / total) * 100) : 0 })))
-  }
+    return { matrix, distances, criteria }
+  }, [criteria, pcsAnswers, weightMethod, ahpMethod])
+
+  // Pairwise matrix visualization for main weights panel
+  const pairwiseMatrixData = useMemo(() => {
+    const n = criteria.length
+    if (n < 2 || weightMethod !== 'pairwise') return null
+    const { matrix } = computeAHP(criteria, pairAnswers, 'full', ahpMethod)
+    return { matrix, criteria }
+  }, [criteria, pairAnswers, weightMethod, ahpMethod])
+
+  // Re-apply weights when ahpMethod toggle changes
+  useEffect(() => {
+    if (weightMethod === 'pairwise' && Object.keys(pairAnswers).length > 0) applyPairwiseWeights(pairAnswers, ahpMethod)
+    if (weightMethod === 'pcs' && Object.keys(pcsAnswers).length > 0) applyPCSWeights(pcsAnswers, ahpMethod)
+  }, [ahpMethod])
 
   const handleMethodSwitch = (newMethod) => {
     if (newMethod === 'direct') {
@@ -480,6 +589,73 @@ export default function App() {
     if (method === 'pcs') { setPcsAnswers({}); applyPCSWeights({}) }
     if (method === 'likert') { setLikertRatings({}) }
   }
+
+  // ─── Preference Lab helpers ───────────────────────────────────────────────
+  const plAddCriterion = () => setPlCriteria(p => [...p, { id: uid('pl'), name: '', weight: 0 }])
+  const plRemoveCriterion = (id) => { setPlCriteria(p => p.filter(c => c.id !== id)); setPlLikertRatings(p => { const { [id]: _, ...r } = p; return r }) }
+  const plUpdateCriterion = (id, f, v) => setPlCriteria(p => p.map(c => c.id === id ? { ...c, [f]: v } : c))
+
+  const plPairPairs = useMemo(() => {
+    const pairs = []
+    for (let i = 0; i < plCriteria.length; i++)
+      for (let j = i + 1; j < plCriteria.length; j++)
+        pairs.push({ a: plCriteria[i], b: plCriteria[j] })
+    return pairs
+  }, [plCriteria])
+
+  const plPcsAdjacentPairs = useMemo(() => {
+    const pairs = []
+    for (let i = 0; i < plCriteria.length - 1; i++)
+      pairs.push({ a: plCriteria[i], b: plCriteria[i + 1] })
+    return pairs
+  }, [plCriteria])
+
+  // Preference Lab: use shared AHP engine
+  const plComputeWeights = (method, crit, likert, pairAns, pcsAns) => {
+    const n = crit.length
+    if (n < 1) return crit
+    if (method === 'direct') return crit
+    if (method === 'likert') {
+      const total = crit.reduce((s, c) => s + (likert[c.id] || 0), 0)
+      return crit.map(c => ({ ...c, weight: total > 0 ? Math.round(((likert[c.id] || 0) / total) * 100) : 0 }))
+    }
+    if ((method === 'pairwise' || method === 'pcs') && n >= 2) {
+      const mode = method === 'pcs' ? 'pcs' : 'full'
+      const ans = method === 'pcs' ? pcsAns : pairAns
+      const { weights: w } = computeAHP(crit, ans, mode, ahpMethod)
+      return crit.map((c, i) => ({ ...c, weight: Math.round(w[i] * 100) }))
+    }
+    return crit
+  }
+
+  const plWeighted = useMemo(() => plComputeWeights(plMethod, plCriteria, plLikertRatings, plPairAnswers, plPcsAnswers), [plMethod, plCriteria, plLikertRatings, plPairAnswers, plPcsAnswers, ahpMethod])
+  const plTotalWeight = plWeighted.reduce((s, c) => s + c.weight, 0)
+  const plNormalized = useMemo(() => {
+    const t = plWeighted.reduce((s, c) => s + c.weight, 0)
+    return plWeighted.map(c => ({ ...c, pct: t > 0 ? (c.weight / t * 100) : 0 }))
+  }, [plWeighted])
+
+  // PL: AHP result for CI/CR display
+  const plAhpResult = useMemo(() => {
+    if (plCriteria.length < 2) return null
+    if (plMethod === 'pairwise') return computeAHP(plCriteria, plPairAnswers, 'full', ahpMethod)
+    if (plMethod === 'pcs') return computeAHP(plCriteria, plPcsAnswers, 'pcs', ahpMethod)
+    return null
+  }, [plCriteria, plPairAnswers, plPcsAnswers, plMethod, ahpMethod])
+
+  // PCS transitivity visualization data
+  const plPcsTransitivityData = useMemo(() => {
+    const n = plCriteria.length
+    if (n < 2 || plMethod !== 'pcs') return null
+    const { matrix } = computeAHP(plCriteria, plPcsAnswers, 'pcs', ahpMethod)
+    const distances = []
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        distances.push({ from: i, to: j, fromName: plCriteria[i].name || `C${i+1}`, toName: plCriteria[j].name || `C${j+1}`, ratio: matrix[i][j], distance: Math.abs(Math.log(matrix[i][j] || 1)), isAdjacent: j === i + 1 })
+      }
+    }
+    return { matrix, distances, criteria: plCriteria }
+  }, [plCriteria, plPcsAnswers, plMethod, ahpMethod])
 
   // ─── Monte Carlo (animated) ────────────────────────────────────────────────
   const startMonteCarlo = () => {
@@ -617,9 +793,14 @@ export default function App() {
                 <p className="text-white/50 text-xs sm:text-sm mt-0.5">Structured decision-making with quantitative sensitivity analysis</p>
               </div>
             </div>
-            <button onClick={() => setShowAbout(true)} className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-white/70 hover:text-white border border-white/10 hover:border-white/25 hover:bg-white/5 transition backdrop-blur-sm">
-              <BookOpen size={13} /> About
-            </button>
+            <div className="hidden sm:flex items-center gap-2">
+              <button onClick={() => setShowPrefLab(true)} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-white/70 hover:text-white border border-white/10 hover:border-white/25 hover:bg-white/5 transition backdrop-blur-sm">
+                <Sliders size={13} /> Preference Lab
+              </button>
+              <button onClick={() => setShowAbout(true)} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-white/70 hover:text-white border border-white/10 hover:border-white/25 hover:bg-white/5 transition backdrop-blur-sm">
+                <BookOpen size={13} /> About
+              </button>
+            </div>
           </div>
         </div>
         <div className="absolute bottom-0 left-0 w-full h-px bg-gradient-to-r from-transparent via-secondary/30 to-transparent" />
@@ -627,47 +808,72 @@ export default function App() {
 
       {/* ━━━ Sticky Header ━━━ */}
       <header className="sticky top-0 z-50 bg-white/95 backdrop-blur-md border-b border-slate-200/80 shadow-sm">
-        <div className="max-w-5xl mx-auto px-4">
-          <div className="flex items-center justify-between h-11">
-            <div className="flex items-center gap-2.5 min-w-0">
-              <div className="w-6 h-6 bg-primary rounded-md flex items-center justify-center shrink-0"><Target size={13} className="text-white" /></div>
-              {title ? (
-                <span className="text-sm font-bold text-slate-800 truncate">{title}</span>
-              ) : (
-                <span className="text-sm font-bold text-slate-400 italic">Untitled Decision</span>
+        {/* Top bar: title + actions */}
+        <div className="max-w-6xl mx-auto px-4 sm:px-6 flex items-center justify-between h-10">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <div className="w-5 h-5 bg-primary rounded flex items-center justify-center shrink-0"><Target size={11} className="text-white" /></div>
+            {title ? (
+              <span className="text-[13px] font-bold text-slate-800 truncate">{title}</span>
+            ) : (
+              <span className="text-[13px] font-bold text-slate-400 italic">Untitled Decision</span>
+            )}
+          </div>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <input ref={fileRef} type="file" accept=".json" onChange={importJSON} className="hidden" />
+            <button onClick={() => fileRef.current?.click()} className="px-2 py-1 text-[11px] text-slate-500 hover:text-slate-700 border border-slate-200 rounded-md hover:bg-slate-50 transition flex items-center gap-1"><Upload size={11} /> Import</button>
+            <button onClick={exportJSON} className="px-2 py-1 text-[11px] text-slate-500 hover:text-slate-700 border border-slate-200 rounded-md hover:bg-slate-50 transition flex items-center gap-1"><Download size={11} /> Export</button>
+            <button onClick={() => setShowAbout(true)} className="px-2 py-1 text-[11px] text-primary hover:text-primary/80 border border-primary/20 rounded-md hover:bg-primary/5 transition flex items-center gap-1 sm:hidden"><BookOpen size={11} /></button>
+            <div className="relative" ref={exRef}>
+              <button onClick={() => setExampleOpen(!exampleOpen)} className="px-2 py-1 text-[11px] text-slate-500 hover:text-slate-700 border border-slate-200 rounded-md hover:bg-slate-50 transition flex items-center gap-1">Examples <ChevronDown size={11} /></button>
+              {exampleOpen && (
+                <div className="absolute right-0 mt-1 bg-white border border-slate-200 rounded-lg shadow-xl z-50 min-w-[200px]">
+                  <button onClick={() => loadExample('apartment')} className="w-full text-left px-3 py-2.5 text-sm hover:bg-slate-50 rounded-t-lg transition">🏠 Berlin Apartment</button>
+                  <button onClick={() => loadExample('dataplatform')} className="w-full text-left px-3 py-2.5 text-sm hover:bg-slate-50 rounded-b-lg border-t border-slate-100 transition">💾 Data Platform</button>
+                </div>
               )}
             </div>
-            <div className="flex items-center gap-1.5 shrink-0">
-              <input ref={fileRef} type="file" accept=".json" onChange={importJSON} className="hidden" />
-              <button onClick={() => fileRef.current?.click()} className="px-2 py-1 text-[11px] text-slate-500 hover:text-slate-700 border border-slate-200 rounded-md hover:bg-slate-50 transition flex items-center gap-1"><Upload size={11} /> Import</button>
-              <button onClick={exportJSON} className="px-2 py-1 text-[11px] text-slate-500 hover:text-slate-700 border border-slate-200 rounded-md hover:bg-slate-50 transition flex items-center gap-1"><Download size={11} /> Export</button>
-              <button onClick={() => setShowAbout(true)} className="px-2 py-1 text-[11px] text-primary hover:text-primary/80 border border-primary/20 rounded-md hover:bg-primary/5 transition flex items-center gap-1 sm:hidden"><BookOpen size={11} /></button>
-              <div className="relative" ref={exRef}>
-                <button onClick={() => setExampleOpen(!exampleOpen)} className="px-2 py-1 text-[11px] text-slate-500 hover:text-slate-700 border border-slate-200 rounded-md hover:bg-slate-50 transition flex items-center gap-1">Examples <ChevronDown size={11} /></button>
-                {exampleOpen && (
-                  <div className="absolute right-0 mt-1 bg-white border border-slate-200 rounded-lg shadow-xl z-50 min-w-[200px]">
-                    <button onClick={() => loadExample('apartment')} className="w-full text-left px-3 py-2.5 text-sm hover:bg-slate-50 rounded-t-lg transition">🏠 Berlin Apartment</button>
-                    <button onClick={() => loadExample('dataplatform')} className="w-full text-left px-3 py-2.5 text-sm hover:bg-slate-50 rounded-b-lg border-t border-slate-100 transition">💾 Data Platform</button>
-                  </div>
-                )}
-              </div>
-            </div>
           </div>
-          {/* Nav */}
-          <nav className="flex items-center gap-1 pb-2 overflow-x-auto">
-            {SECTIONS.map((s) => {
+        </div>
+        {/* Step Nav — connected circles + progress line */}
+        <div className="max-w-6xl mx-auto px-4 sm:px-6 pb-2.5 pt-1">
+          <div className="flex items-start">
+            {SECTIONS.map((s, i) => {
               const ok = unlocked[s.id]; const active = activeSection === s.id
+              const done = sectionIdx > i && ok
               return (
-                <button key={s.id} onClick={() => scrollTo(s.id)} disabled={!ok}
-                  className={`flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold whitespace-nowrap transition-all ${
-                    !ok ? 'text-slate-300 cursor-not-allowed' : active ? 'bg-primary text-white shadow-md shadow-primary/20 scale-105' : 'text-slate-500 hover:bg-slate-100'
-                  }`}>
-                  {!ok && <Lock size={9} />}
-                  <span className="tabular-nums">{s.num}</span> {s.label}
-                </button>
+                <React.Fragment key={s.id}>
+                  {/* Connector line before (not for first) */}
+                  {i > 0 && (
+                    <div className="flex-1 flex items-center pt-[11px]">
+                      <div className={`h-[2px] w-full rounded-full transition-colors duration-300 ${done ? 'bg-primary' : ok ? 'bg-slate-200' : 'bg-slate-100'}`} />
+                    </div>
+                  )}
+                  {/* Step node */}
+                  <button onClick={() => scrollTo(s.id)} disabled={!ok}
+                    className="group relative flex flex-col items-center shrink-0" title={s.desc}>
+                    {/* Circle */}
+                    <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold transition-all duration-300 ${
+                      !ok ? 'bg-slate-100 text-slate-300 border border-slate-200'
+                      : active ? 'bg-primary text-white shadow-lg shadow-primary/30 ring-[3px] ring-primary/15 scale-110'
+                      : done ? 'bg-primary text-white'
+                      : 'bg-white text-slate-400 border-2 border-slate-300 group-hover:border-primary/40 group-hover:text-primary'
+                    }`}>
+                      {!ok ? <Lock size={9} /> : done && !active ? <span className="text-[10px]">✓</span> : s.num}
+                    </div>
+                    {/* Label */}
+                    <span className={`mt-1 text-[10px] font-semibold transition-colors leading-tight ${
+                      !ok ? 'text-slate-300' : active ? 'text-primary' : done ? 'text-slate-600' : 'text-slate-400 group-hover:text-slate-600'
+                    }`}>{s.label}</span>
+                    {/* Tooltip */}
+                    <div className="absolute top-full mt-4 left-1/2 -translate-x-1/2 px-2.5 py-1.5 bg-slate-800 text-white text-[10px] rounded-lg shadow-lg whitespace-nowrap opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity duration-200 z-50">
+                      {s.desc}
+                      <div className="absolute -top-1 left-1/2 -translate-x-1/2 w-2 h-2 bg-slate-800 rotate-45" />
+                    </div>
+                  </button>
+                </React.Fragment>
               )
             })}
-          </nav>
+          </div>
         </div>
       </header>
 
@@ -726,18 +932,39 @@ export default function App() {
                     {/* ═══ 2. CRITERIA ═══ */}
                     {sec.id === 'criteria' && (
                       <div className="space-y-1">
-                        <p className="text-[11px] text-slate-400 mb-2">Drag ⠿ to reorder priority. Toggle max/min.</p>
+                        <p className="text-[11px] text-slate-400 mb-2">Drag ⠿ to reorder priority. Toggle max/min. Optionally set K.O. thresholds.</p>
                         {criteria.map((c, i) => (
                           <div key={c.id} draggable onDragStart={e => onDragStart(e, i)} onDragEnd={onDragEnd} onDragOver={onDragOver} onDrop={e => onDrop(e, i)}
-                            className={`flex items-center gap-2 group rounded-lg px-1 py-1.5 transition ${dragCrit === i ? 'opacity-20 scale-95' : 'hover:bg-slate-50'}`}>
-                            <div className="cursor-grab active:cursor-grabbing text-slate-300 hover:text-slate-500"><GripVertical size={15} /></div>
-                            <span className="text-[11px] text-slate-400 w-4 text-right font-mono">{i + 1}</span>
-                            <input className="flex-1 border border-slate-200 rounded-lg px-3 py-1.5 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-primary/25 transition" value={c.name} onChange={e => updateCriterion(c.id, 'name', e.target.value)} placeholder="Criterion name…" />
-                            <button onClick={() => updateCriterion(c.id, 'direction', c.direction === 'maximize' ? 'minimize' : 'maximize')}
-                              className={`flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition min-w-[85px] justify-center ${c.direction === 'maximize' ? 'bg-emerald-50 text-emerald-600 hover:bg-emerald-100' : 'bg-blue-50 text-blue-600 hover:bg-blue-100'}`}>
-                              {c.direction === 'maximize' ? <><TrendingUp size={12} /> Max</> : <><TrendingDown size={12} /> Min</>}
-                            </button>
-                            <button onClick={() => removeCriterion(c.id)} className="opacity-0 group-hover:opacity-100 text-slate-300 hover:text-red-500 transition"><Trash2 size={14} /></button>
+                            className={`group rounded-lg px-1 py-1.5 transition ${dragCrit === i ? 'opacity-20 scale-95' : 'hover:bg-slate-50'} ${c.ko ? 'ring-1 ring-red-200 bg-red-50/30' : ''}`}>
+                            <div className="flex items-center gap-2">
+                              <div className="cursor-grab active:cursor-grabbing text-slate-300 hover:text-slate-500"><GripVertical size={15} /></div>
+                              <span className="text-[11px] text-slate-400 w-4 text-right font-mono">{i + 1}</span>
+                              <input className="flex-1 border border-slate-200 rounded-lg px-3 py-1.5 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-primary/25 transition" value={c.name} onChange={e => updateCriterion(c.id, 'name', e.target.value)} placeholder="Criterion name…" />
+                              <button onClick={() => updateCriterion(c.id, 'direction', c.direction === 'maximize' ? 'minimize' : 'maximize')}
+                                className={`flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition min-w-[85px] justify-center ${c.direction === 'maximize' ? 'bg-emerald-50 text-emerald-600 hover:bg-emerald-100' : 'bg-blue-50 text-blue-600 hover:bg-blue-100'}`}>
+                                {c.direction === 'maximize' ? <><TrendingUp size={12} /> Max</> : <><TrendingDown size={12} /> Min</>}
+                              </button>
+                              {/* K.O. toggle */}
+                              <button onClick={() => updateCriterion(c.id, 'ko', !c.ko)}
+                                title={c.ko ? 'K.O. criterion active — click to remove' : 'Set as K.O. criterion (knockout threshold)'}
+                                className={`flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs font-semibold transition ${c.ko ? 'bg-red-100 text-red-700 hover:bg-red-200 ring-1 ring-red-300' : 'bg-slate-100 text-slate-400 hover:bg-slate-200 hover:text-slate-600'}`}>
+                                <Shield size={11} /> K.O.
+                              </button>
+                              <button onClick={() => removeCriterion(c.id)} className="opacity-0 group-hover:opacity-100 text-slate-300 hover:text-red-500 transition"><Trash2 size={14} /></button>
+                            </div>
+                            {/* K.O. configuration row */}
+                            {c.ko && (
+                              <div className="ml-12 mt-1.5 flex items-center gap-2 text-[11px]">
+                                <span className="text-red-600 font-semibold">K.O.:</span>
+                                <span className="text-slate-500">Alternative fails if value is</span>
+                                <button onClick={() => updateCriterion(c.id, 'koDirection', c.koDirection === 'min' ? 'max' : 'min')}
+                                  className={`px-2 py-0.5 rounded font-semibold transition ${c.koDirection === 'min' ? 'bg-blue-100 text-blue-700' : 'bg-emerald-100 text-emerald-700'}`}>
+                                  {c.koDirection === 'min' ? '< below' : '> above'}
+                                </button>
+                                <input type="number" value={c.koValue ?? ''} onChange={e => updateCriterion(c.id, 'koValue', e.target.value)}
+                                  placeholder="threshold" className="w-20 border border-red-200 rounded px-2 py-0.5 text-[11px] font-mono bg-white focus:outline-none focus:ring-1 focus:ring-red-300" />
+                              </div>
+                            )}
                           </div>
                         ))}
                         <button onClick={addCriterion} className="flex items-center gap-1.5 text-xs font-semibold text-primary hover:text-primary/80 transition mt-1 ml-7"><Plus size={14} /> Add Criterion</button>
@@ -841,6 +1068,23 @@ export default function App() {
                                       {Object.keys(pairAnswers).length < pairPairs.length && <span className="text-amber-500 font-medium"> Highlighted pairs still at default.</span>}
                                     </p>
 
+                                    {/* AHP method toggle */}
+                                    <div className="flex items-center gap-2 text-[10px]">
+                                      <span className="text-slate-400 font-medium">Priority vector:</span>
+                                      <button onClick={() => setAhpMethod('eigenvector')} className={`px-2 py-0.5 rounded font-semibold transition ${ahpMethod === 'eigenvector' ? 'bg-primary text-white' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}>Eigenvector (Saaty)</button>
+                                      <button onClick={() => setAhpMethod('geometric')} className={`px-2 py-0.5 rounded font-semibold transition ${ahpMethod === 'geometric' ? 'bg-primary text-white' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}>Geometric Mean (Crawford)</button>
+                                    </div>
+
+                                    {/* CI/CR display */}
+                                    {pairwiseResult && pairwiseResult.consistency && criteria.length >= 3 && (
+                                      <div className={`flex items-center gap-3 rounded-lg p-2 text-[10px] border ${pairwiseResult.consistency.consistent ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : 'bg-red-50 border-red-200 text-red-700'}`}>
+                                        <span className="font-semibold">{pairwiseResult.consistency.consistent ? '✓ Consistent' : '✗ Inconsistent'}</span>
+                                        <span className="font-mono">CI = {pairwiseResult.consistency.ci.toFixed(4)}</span>
+                                        <span className="font-mono">CR = {(pairwiseResult.consistency.cr * 100).toFixed(1)}%</span>
+                                        <span className="text-slate-400">(threshold ≤ 10%)</span>
+                                      </div>
+                                    )}
+
                                     {/* Progress */}
                                     <div className="flex items-center gap-2">
                                       <div className="flex-1 bg-slate-200 rounded-full h-1.5 overflow-hidden">
@@ -897,9 +1141,26 @@ export default function App() {
                                       })}
                                     </div>
 
+                                    {/* Pairwise Comparison Matrix */}
+                                    {pairwiseMatrixData && Object.keys(pairAnswers).length > 0 && (
+                                      <div className="bg-slate-50 rounded-xl border border-slate-200 p-3 space-y-2">
+                                        <h5 className="text-[10px] font-bold text-slate-600">Comparison Matrix</h5>
+                                        <div className="overflow-x-auto">
+                                          <table className="text-[9px] font-mono">
+                                            <thead><tr><th className="p-1"></th>{pairwiseMatrixData.criteria.map((c, i) => <th key={i} className="p-1 text-slate-500 font-bold">{(c.name || `C${i+1}`).slice(0, 6)}</th>)}</tr></thead>
+                                            <tbody>{pairwiseMatrixData.matrix.map((row, i) => (
+                                              <tr key={i}><td className="p-1 font-bold text-slate-500">{(pairwiseMatrixData.criteria[i].name || `C${i+1}`).slice(0, 6)}</td>
+                                                {row.map((val, j) => <td key={j} className={`p-1 text-center ${i === j ? 'text-slate-300' : 'text-slate-600'}`}>{val >= 1 ? val.toFixed(1) : `1/${(1/val).toFixed(1)}`}</td>)}
+                                              </tr>
+                                            ))}</tbody>
+                                          </table>
+                                        </div>
+                                      </div>
+                                    )}
+
                                     {Object.keys(pairAnswers).length === pairPairs.length && (
                                       <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-2 text-xs text-emerald-700 font-semibold flex items-center gap-1.5">
-                                        <span>✓</span> All {pairPairs.length} pairs rated — AHP eigenvector weights applied.
+                                        <span>✓</span> All {pairPairs.length} pairs rated — weights applied via {ahpMethod === 'geometric' ? 'Geometric Mean (Crawford)' : 'Eigenvector (Saaty)'}.
                                       </div>
                                     )}
 
@@ -926,6 +1187,23 @@ export default function App() {
                                         <button onClick={() => setShowPcsInfo(true)} className="inline-flex items-center gap-0.5 underline font-semibold hover:text-blue-900 transition">Research & Methodology ↗</button>
                                       </span>
                                     </div>
+
+                                    {/* AHP method toggle */}
+                                    <div className="flex items-center gap-2 text-[10px]">
+                                      <span className="text-slate-400 font-medium">Priority vector:</span>
+                                      <button onClick={() => setAhpMethod('eigenvector')} className={`px-2 py-0.5 rounded font-semibold transition ${ahpMethod === 'eigenvector' ? 'bg-primary text-white' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}>Eigenvector (Saaty)</button>
+                                      <button onClick={() => setAhpMethod('geometric')} className={`px-2 py-0.5 rounded font-semibold transition ${ahpMethod === 'geometric' ? 'bg-primary text-white' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}>Geometric Mean (Crawford)</button>
+                                    </div>
+
+                                    {/* CI/CR display */}
+                                    {pcsResult && pcsResult.consistency && criteria.length >= 3 && (
+                                      <div className={`flex items-center gap-3 rounded-lg p-2 text-[10px] border ${pcsResult.consistency.consistent ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : 'bg-red-50 border-red-200 text-red-700'}`}>
+                                        <span className="font-semibold">{pcsResult.consistency.consistent ? '✓ Consistent' : '✗ Inconsistent'}</span>
+                                        <span className="font-mono">CI = {pcsResult.consistency.ci.toFixed(4)}</span>
+                                        <span className="font-mono">CR = {(pcsResult.consistency.cr * 100).toFixed(1)}%</span>
+                                        <span className="text-slate-400">(threshold ≤ 10%)</span>
+                                      </div>
+                                    )}
 
                                     <p className="text-[10px] text-slate-400">
                                       Compare adjacent criteria — which is more important? Default is <strong>1 (equal)</strong>.
@@ -988,9 +1266,93 @@ export default function App() {
                                       })}
                                     </div>
 
+                                    {/* Transitivity SVG map + matrix */}
+                                    {pcsTransitivityData && Object.keys(pcsAnswers).length > 0 && (
+                                      <div className="bg-slate-50 rounded-xl border border-slate-200 p-4 space-y-3">
+                                        <h4 className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                                          <Eye size={12} className="text-primary" /> Transitivity Map
+                                        </h4>
+                                        <p className="text-[10px] text-slate-500">
+                                          Direct comparisons (solid) and derived ratios (dashed). Circle size = weight, distance = preference strength.
+                                        </p>
+                                        <div className="bg-white rounded-lg border border-slate-100 p-2">
+                                          <svg viewBox="0 0 500 300" className="w-full" style={{ maxHeight: '280px' }}>
+                                            {(() => {
+                                              const n = pcsTransitivityData.criteria.length
+                                              if (n < 2) return null
+                                              const positions = []
+                                              let cumX = 60
+                                              positions.push({ x: cumX, y: 150 })
+                                              for (let i = 1; i < n; i++) {
+                                                const key = `${pcsTransitivityData.criteria[i-1].id}_${pcsTransitivityData.criteria[i].id}`
+                                                const ans = pcsAnswers[key] || 1
+                                                const ratio = ans > 0 ? ans : 1 / Math.abs(ans)
+                                                const dist = Math.abs(Math.log(ratio))
+                                                cumX += 40 + dist * 40
+                                                const yOffset = (i % 2 === 0 ? -1 : 1) * (20 + dist * 15)
+                                                positions.push({ x: Math.min(cumX, 440), y: 150 + yOffset })
+                                              }
+                                              const maxX = Math.max(...positions.map(p => p.x))
+                                              positions.forEach(p => { p.x = 30 + (p.x - 60) * (380 / (maxX - 60 || 1)) + 30 })
+                                              return (
+                                                <>
+                                                  {pcsTransitivityData.distances.filter(d => !d.isAdjacent).map((d, i) => (
+                                                    <line key={`der-${i}`} x1={positions[d.from].x} y1={positions[d.from].y} x2={positions[d.to].x} y2={positions[d.to].y} stroke="#e2e8f0" strokeWidth="1" strokeDasharray="4,3" />
+                                                  ))}
+                                                  {pcsTransitivityData.distances.filter(d => d.isAdjacent).map((d, i) => (
+                                                    <line key={`adj-${i}`} x1={positions[d.from].x} y1={positions[d.from].y} x2={positions[d.to].x} y2={positions[d.to].y} stroke="#4f6ef7" strokeWidth="2.5" />
+                                                  ))}
+                                                  {pcsTransitivityData.distances.map((d, i) => {
+                                                    const mx = (positions[d.from].x + positions[d.to].x) / 2
+                                                    const my = (positions[d.from].y + positions[d.to].y) / 2 - 8
+                                                    return (
+                                                      <text key={`lbl-${i}`} x={mx} y={my} textAnchor="middle" className={`text-[9px] font-mono ${d.isAdjacent ? 'fill-primary font-bold' : 'fill-slate-400'}`}>
+                                                        {d.ratio >= 1 ? d.ratio.toFixed(1) : `1/${(1/d.ratio).toFixed(1)}`}
+                                                      </text>
+                                                    )
+                                                  })}
+                                                  {positions.map((pos, i) => {
+                                                    const w = normalizedWeights[i]?.pct || 0
+                                                    const r = Math.max(14, 10 + w * 0.3)
+                                                    return (
+                                                      <g key={i}>
+                                                        <circle cx={pos.x} cy={pos.y} r={r} fill="#4f6ef7" fillOpacity="0.15" stroke="#4f6ef7" strokeWidth="2" />
+                                                        <circle cx={pos.x} cy={pos.y} r={r - 4} fill="#4f6ef7" fillOpacity={0.1 + w * 0.008} />
+                                                        <text x={pos.x} y={pos.y + 1} textAnchor="middle" dominantBaseline="middle" className="text-[9px] font-bold fill-primary">
+                                                          {(pcsTransitivityData.criteria[i].name || `C${i+1}`).slice(0, 4)}
+                                                        </text>
+                                                        <text x={pos.x} y={pos.y + r + 12} textAnchor="middle" className="text-[8px] font-mono fill-slate-500">
+                                                          {w.toFixed(0)}%
+                                                        </text>
+                                                      </g>
+                                                    )
+                                                  })}
+                                                </>
+                                              )
+                                            })()}
+                                          </svg>
+                                        </div>
+                                        <h5 className="text-[10px] font-bold text-slate-600">Reconstructed Matrix</h5>
+                                        <div className="overflow-x-auto">
+                                          <table className="text-[9px] font-mono">
+                                            <thead><tr><th className="p-1"></th>{pcsTransitivityData.criteria.map((c, i) => <th key={i} className="p-1 text-slate-500 font-bold">{(c.name || `C${i+1}`).slice(0, 6)}</th>)}</tr></thead>
+                                            <tbody>{pcsTransitivityData.matrix.map((row, i) => (
+                                              <tr key={i}><td className="p-1 font-bold text-slate-500">{(pcsTransitivityData.criteria[i].name || `C${i+1}`).slice(0, 6)}</td>
+                                                {row.map((val, j) => <td key={j} className={`p-1 text-center ${i === j ? 'text-slate-300' : Math.abs(i-j) === 1 ? 'text-primary font-bold bg-primary/5' : 'text-slate-500 bg-amber-50/50'}`}>{val >= 1 ? val.toFixed(1) : `1/${(1/val).toFixed(1)}`}</td>)}
+                                              </tr>
+                                            ))}</tbody>
+                                          </table>
+                                        </div>
+                                        <div className="flex gap-3 text-[9px] text-slate-400">
+                                          <span className="flex items-center gap-1"><span className="w-2 h-2 bg-primary/20 rounded-sm" /> Direct (adjacent)</span>
+                                          <span className="flex items-center gap-1"><span className="w-2 h-2 bg-amber-100 rounded-sm" /> Derived (transitivity)</span>
+                                        </div>
+                                      </div>
+                                    )}
+
                                     {Object.keys(pcsAnswers).length === pcsAdjacentPairs.length && (
                                       <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-2 text-xs text-emerald-700 font-semibold flex items-center gap-1.5">
-                                        <span>✓</span> All {pcsAdjacentPairs.length} pairs rated — consistent matrix reconstructed via geometric mean.
+                                        <span>✓</span> All {pcsAdjacentPairs.length} pairs rated — weights applied via {ahpMethod === 'geometric' ? 'Geometric Mean (Crawford)' : 'Eigenvector (Saaty)'}.
                                       </div>
                                     )}
 
@@ -1115,12 +1477,25 @@ export default function App() {
                     {sec.id === 'results' && (
                       <div className="space-y-5">
                         {mcda.ranking.length > 0 && (
-                          <div className="bg-gradient-to-r from-primary/5 via-secondary/5 to-primary/5 border border-primary/15 rounded-xl p-4 flex items-center gap-3">
-                            <Trophy size={28} className="text-primary shrink-0" />
+                          <div className={`border rounded-xl p-4 flex items-center gap-3 ${mcda.ranking[0].koFailed ? 'bg-gradient-to-r from-red-50 to-amber-50 border-red-200' : 'bg-gradient-to-r from-primary/5 via-secondary/5 to-primary/5 border-primary/15'}`}>
+                            <Trophy size={28} className={mcda.ranking[0].koFailed ? 'text-red-400 shrink-0' : 'text-primary shrink-0'} />
                             <div className="min-w-0">
                               <div className="text-base font-bold text-slate-800 truncate">{mcda.ranking[0].name}</div>
                               <div className="text-xs text-slate-500">Weighted Utility: <span className="font-mono font-bold text-primary">{(mcda.ranking[0].utility * 100).toFixed(1)}%</span></div>
+                              {mcda.ranking[0].koFailed && <div className="text-[10px] text-red-600 font-semibold mt-0.5">Warning: Winner failed K.O. criteria</div>}
                             </div>
+                          </div>
+                        )}
+
+                        {/* K.O. failures */}
+                        {Object.keys(mcda.koFails || {}).length > 0 && (
+                          <div className="bg-red-50 border border-red-200 rounded-xl p-3 space-y-1.5">
+                            <div className="flex items-center gap-1.5 text-xs font-bold text-red-700"><Shield size={13} /> K.O. Criteria Violations</div>
+                            {alternatives.filter(a => mcda.koFails[a.id]).map(a => (
+                              <div key={a.id} className="text-[11px] text-red-600">
+                                <strong>{a.name}:</strong> {mcda.koFails[a.id].map(f => `${f.criterion} (${f.value} ${f.direction === 'min' ? '<' : '>'} ${f.threshold})`).join(', ')}
+                              </div>
+                            ))}
                           </div>
                         )}
 
@@ -1191,7 +1566,10 @@ export default function App() {
                                     <td className="py-2.5 px-2">
                                       <span className={`inline-flex w-5 h-5 rounded-full items-center justify-center text-[10px] font-bold ${i < 3 ? 'text-white' : 'bg-slate-200 text-slate-500'}`} style={i < 3 ? { backgroundColor: RANK_COLORS[i] } : {}}>{i + 1}</span>
                                     </td>
-                                    <td className="py-2.5 px-2 font-semibold text-sm text-slate-800">{r.name}</td>
+                                    <td className="py-2.5 px-2 font-semibold text-sm text-slate-800">
+                                      {r.name}
+                                      {r.koFailed && <span className="ml-1.5 text-[9px] font-bold text-red-500 bg-red-100 px-1.5 py-0.5 rounded">K.O.</span>}
+                                    </td>
                                     {criteria.map(c => {
                                       const pw = r.partWorths[c.id] || 0
                                       const maxPw = Math.max(...mcda.ranking.map(x => x.partWorths[c.id] || 0))
@@ -1627,6 +2005,319 @@ export default function App() {
           <button onClick={() => setShowAbout(true)} className="text-[10px] text-primary/60 hover:text-primary font-medium transition">About this tool</button>
         </div>
       </footer>
+
+      {/* ═══ Preference Lab Modal — vertical, dynamic ═══ */}
+      {showPrefLab && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={() => setShowPrefLab(false)}>
+          <div className="bg-white rounded-2xl shadow-2xl max-w-4xl w-full mx-4 max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+            {/* Header */}
+            <div className="sticky top-0 bg-gradient-to-br from-[#1e293b] via-[#334155] to-[#1e293b] rounded-t-2xl p-5 relative overflow-hidden z-10">
+              <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top_right,rgba(79,110,247,0.3),transparent_50%)]" />
+              <div className="relative flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 bg-white/10 rounded-xl flex items-center justify-center backdrop-blur-sm border border-white/10">
+                    <Sliders size={20} className="text-white" />
+                  </div>
+                  <div>
+                    <h3 className="text-lg font-bold text-white">Preference Lab</h3>
+                    <p className="text-white/50 text-xs">Independent criteria weighting — all sections update dynamically</p>
+                  </div>
+                </div>
+                <button onClick={() => setShowPrefLab(false)} className="p-1.5 rounded-lg hover:bg-white/10 text-white/50 hover:text-white transition"><X size={18} /></button>
+              </div>
+            </div>
+
+            <div className="p-5 space-y-5">
+              {/* ── Section 1: Criteria ── */}
+              <div className="space-y-2">
+                <h4 className="text-[13px] font-bold text-slate-800 flex items-center gap-2">
+                  <span className="w-5 h-5 rounded bg-primary/10 flex items-center justify-center text-[10px] font-bold text-primary">1</span>
+                  Criteria
+                </h4>
+                <p className="text-[11px] text-slate-400">Add criteria — independent from the MCDA above.</p>
+                {plCriteria.map((c, i) => (
+                  <div key={c.id} className="flex items-center gap-2 group">
+                    <span className="text-[11px] text-slate-400 w-5 text-right font-mono">{i + 1}</span>
+                    <input className="flex-1 border border-slate-200 rounded-lg px-3 py-1.5 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-primary/25 transition" value={c.name} onChange={e => plUpdateCriterion(c.id, 'name', e.target.value)} placeholder="Criterion name…" />
+                    <button onClick={() => plRemoveCriterion(c.id)} className="opacity-0 group-hover:opacity-100 text-slate-300 hover:text-red-500 transition"><Trash2 size={14} /></button>
+                  </div>
+                ))}
+                <button onClick={plAddCriterion} className="flex items-center gap-1.5 text-xs font-semibold text-primary hover:text-primary/80 transition ml-7"><Plus size={14} /> Add Criterion</button>
+              </div>
+
+              {/* ── Section 2: Method & Rating (only if ≥2 criteria) ── */}
+              {plCriteria.length >= 2 && (
+                <div className="space-y-3 border-t border-slate-100 pt-5">
+                  <h4 className="text-[13px] font-bold text-slate-800 flex items-center gap-2">
+                    <span className="w-5 h-5 rounded bg-primary/10 flex items-center justify-center text-[10px] font-bold text-primary">2</span>
+                    Weight Elicitation
+                  </h4>
+                  {/* Method selector */}
+                  <div className="flex gap-1 flex-wrap">
+                    {[
+                      { id: 'direct', label: 'Direct Rating' },
+                      { id: 'likert', label: 'Likert Scale' },
+                      { id: 'pairwise', label: 'Pairwise (AHP)' },
+                      { id: 'pcs', label: 'PC Simplified' },
+                    ].map(m => (
+                      <button key={m.id} onClick={() => { setPlMethod(m.id); if (m.id === 'pairwise') setPlPairAnswers({}); if (m.id === 'pcs') setPlPcsAnswers({}); if (m.id === 'likert') setPlLikertRatings({}) }}
+                        className={`px-3 py-1.5 rounded-lg text-[11px] font-bold transition ${plMethod === m.id ? 'bg-primary text-white shadow-md' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}>
+                        {m.label}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* AHP method toggle (for pairwise/pcs) */}
+                  {(plMethod === 'pairwise' || plMethod === 'pcs') && (
+                    <div className="flex items-center gap-2 text-[10px]">
+                      <span className="text-slate-400 font-medium">Priority vector:</span>
+                      <button onClick={() => setAhpMethod('eigenvector')} className={`px-2 py-0.5 rounded font-semibold transition ${ahpMethod === 'eigenvector' ? 'bg-primary text-white' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}>Eigenvector (Saaty)</button>
+                      <button onClick={() => setAhpMethod('geometric')} className={`px-2 py-0.5 rounded font-semibold transition ${ahpMethod === 'geometric' ? 'bg-primary text-white' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}>Geometric Mean (Crawford)</button>
+                    </div>
+                  )}
+
+                  {/* Direct Rating */}
+                  {plMethod === 'direct' && (
+                    <div className="space-y-2">
+                      {plCriteria.map(c => (
+                        <div key={c.id} className="flex items-center gap-2">
+                          <span className="text-[11px] w-28 truncate font-medium text-slate-700">{c.name || '—'}</span>
+                          <input type="range" min="0" max="100" value={c.weight} onChange={e => plUpdateCriterion(c.id, 'weight', parseInt(e.target.value))} className="flex-1 accent-primary" />
+                          <input type="number" min="0" max="100" value={c.weight} onChange={e => plUpdateCriterion(c.id, 'weight', Math.max(0, parseInt(e.target.value) || 0))} className="w-14 border border-slate-200 rounded-md px-2 py-1 text-xs font-mono text-center focus:outline-none focus:ring-1 focus:ring-primary/25" />
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Likert Scale */}
+                  {plMethod === 'likert' && (
+                    <div className="space-y-2.5">
+                      {plCriteria.map(c => {
+                        const cur = plLikertRatings[c.id] || 0
+                        return (
+                          <div key={c.id} className="space-y-1">
+                            <span className="text-[11px] font-medium text-slate-700">{c.name || '—'}</span>
+                            <div className="flex gap-1">
+                              {LIKERT.map(l => (
+                                <button key={l.value} onClick={() => setPlLikertRatings(p => ({ ...p, [c.id]: l.value }))}
+                                  className={`flex-1 py-1.5 rounded-md text-[10px] font-bold transition border ${cur === l.value ? 'border-primary bg-primary text-white' : 'border-slate-200 bg-white text-slate-400 hover:bg-slate-50'}`}>
+                                  {l.value}
+                                </button>
+                              ))}
+                            </div>
+                            <div className="flex justify-between text-[9px] text-slate-300 px-0.5"><span>Not important</span><span>Critical</span></div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
+
+                  {/* Pairwise AHP */}
+                  {plMethod === 'pairwise' && (
+                    <div className="space-y-2">
+                      <div className="flex items-center gap-2">
+                        <div className="flex-1 bg-slate-200 rounded-full h-1.5 overflow-hidden">
+                          <div className="h-full bg-primary rounded-full transition-all duration-300" style={{ width: `${(Object.keys(plPairAnswers).length / (plPairPairs.length || 1)) * 100}%` }} />
+                        </div>
+                        <span className="text-[10px] font-mono text-slate-400">{Object.keys(plPairAnswers).length} / {plPairPairs.length}</span>
+                      </div>
+                      {plPairPairs.map((pair, idx) => {
+                        const key = `${pair.a.id}_${pair.b.id}`
+                        const answered = key in plPairAnswers
+                        const currentVal = plPairAnswers[key] ?? 1
+                        const scaleValues = [9, 7, 5, 3, 1, -3, -5, -7, -9]
+                        return (
+                          <div key={key} className={`rounded-xl p-3 border transition-all ${answered ? 'bg-white border-slate-200' : 'bg-amber-50/50 border-amber-200/70'}`}>
+                            <div className="flex items-center gap-2 mb-2">
+                              <span className="text-[10px] font-mono text-slate-300 w-4 text-right shrink-0">{idx + 1}.</span>
+                              <span className="text-[11px] font-bold text-primary flex-1 truncate">{pair.a.name || '—'}</span>
+                              <span className="text-[10px] text-slate-300 font-medium shrink-0">vs</span>
+                              <span className="text-[11px] font-bold text-secondary flex-1 truncate text-right">{pair.b.name || '—'}</span>
+                            </div>
+                            <div className="flex items-center gap-0.5">
+                              <span className="text-[8px] text-primary w-4 text-center shrink-0 font-bold">◀</span>
+                              {scaleValues.map(val => (
+                                <button key={val} onClick={() => setPlPairAnswers(p => ({ ...p, [key]: val }))}
+                                  className={`flex-1 py-1.5 rounded text-[10px] font-bold transition border ${
+                                    currentVal === val ? (val === 1 ? 'border-slate-600 bg-slate-600 text-white' : val > 1 ? 'border-primary bg-primary text-white' : 'border-secondary bg-secondary text-white') : 'border-slate-200 bg-white text-slate-400 hover:bg-slate-50'
+                                  }`}>{Math.abs(val)}</button>
+                              ))}
+                              <span className="text-[8px] text-secondary w-4 text-center shrink-0 font-bold">▶</span>
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
+
+                  {/* PC Simplified */}
+                  {plMethod === 'pcs' && (
+                    <div className="space-y-2">
+                      <div className="bg-blue-50 border border-blue-100 rounded-lg p-2 text-[10px] text-blue-700 flex items-start gap-1.5">
+                        <Info size={11} className="shrink-0 mt-0.5" />
+                        <span><strong>PC Simplified</strong>: Only <strong>{plPcsAdjacentPairs.length}</strong> adjacent pairs instead of {plPairPairs.length}. Transitivity reconstructs the full matrix.</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <div className="flex-1 bg-slate-200 rounded-full h-1.5 overflow-hidden">
+                          <div className="h-full bg-primary rounded-full transition-all duration-300" style={{ width: `${(Object.keys(plPcsAnswers).length / (plPcsAdjacentPairs.length || 1)) * 100}%` }} />
+                        </div>
+                        <span className="text-[10px] font-mono text-slate-400">{Object.keys(plPcsAnswers).length} / {plPcsAdjacentPairs.length}</span>
+                      </div>
+                      {plPcsAdjacentPairs.map((pair, idx) => {
+                        const key = `${pair.a.id}_${pair.b.id}`
+                        const answered = key in plPcsAnswers
+                        const currentVal = plPcsAnswers[key] ?? 1
+                        const scaleValues = [9, 7, 5, 3, 1, -3, -5, -7, -9]
+                        return (
+                          <div key={key} className={`rounded-xl p-3 border transition-all ${answered ? 'bg-white border-slate-200' : 'bg-amber-50/50 border-amber-200/70'}`}>
+                            <div className="flex items-center gap-2 mb-2">
+                              <span className="text-[10px] font-mono text-slate-300 w-4 text-right shrink-0">{idx + 1}.</span>
+                              <span className="text-[11px] font-bold text-primary flex-1 truncate">{pair.a.name || '—'}</span>
+                              <span className="text-[10px] text-slate-300 font-medium shrink-0">vs</span>
+                              <span className="text-[11px] font-bold text-secondary flex-1 truncate text-right">{pair.b.name || '—'}</span>
+                            </div>
+                            <div className="flex items-center gap-0.5">
+                              <span className="text-[8px] text-primary w-4 text-center shrink-0 font-bold">◀</span>
+                              {scaleValues.map(val => (
+                                <button key={val} onClick={() => setPlPcsAnswers(p => ({ ...p, [key]: val }))}
+                                  className={`flex-1 py-1.5 rounded text-[10px] font-bold transition border ${
+                                    currentVal === val ? (val === 1 ? 'border-slate-600 bg-slate-600 text-white' : val > 1 ? 'border-primary bg-primary text-white' : 'border-secondary bg-secondary text-white') : 'border-slate-200 bg-white text-slate-400 hover:bg-slate-50'
+                                  }`}>{Math.abs(val)}</button>
+                              ))}
+                              <span className="text-[8px] text-secondary w-4 text-center shrink-0 font-bold">▶</span>
+                            </div>
+                          </div>
+                        )
+                      })}
+                      {/* Transitivity SVG map + matrix */}
+                      {plPcsTransitivityData && Object.keys(plPcsAnswers).length > 0 && (
+                        <div className="bg-slate-50 rounded-xl border border-slate-200 p-4 space-y-3">
+                          <h4 className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                            <Eye size={12} className="text-primary" /> Transitivity Map
+                          </h4>
+                          <p className="text-[10px] text-slate-500">
+                            Direct comparisons (solid) and derived ratios (dashed). Circle size = weight, distance = preference strength.
+                          </p>
+                          <div className="bg-white rounded-lg border border-slate-100 p-2">
+                            <svg viewBox="0 0 500 300" className="w-full" style={{ maxHeight: '280px' }}>
+                              {(() => {
+                                const n = plPcsTransitivityData.criteria.length
+                                if (n < 2) return null
+                                const weighted = plNormalized
+                                const positions = []
+                                let cumX = 60
+                                positions.push({ x: cumX, y: 150 })
+                                for (let i = 1; i < n; i++) {
+                                  const key = `${plPcsTransitivityData.criteria[i-1].id}_${plPcsTransitivityData.criteria[i].id}`
+                                  const ans = plPcsAnswers[key] || 1
+                                  const ratio = ans > 0 ? ans : 1 / Math.abs(ans)
+                                  const dist = Math.abs(Math.log(ratio))
+                                  cumX += 40 + dist * 40
+                                  const yOffset = (i % 2 === 0 ? -1 : 1) * (20 + dist * 15)
+                                  positions.push({ x: Math.min(cumX, 440), y: 150 + yOffset })
+                                }
+                                const maxX = Math.max(...positions.map(p => p.x))
+                                const scale = maxX > 440 ? 440 / maxX : 1
+                                positions.forEach(p => { p.x = 30 + (p.x - 60) * scale * (380 / (maxX - 60 || 1)) + 30 })
+                                return (
+                                  <>
+                                    {plPcsTransitivityData.distances.filter(d => !d.isAdjacent).map((d, i) => (
+                                      <line key={`der-${i}`} x1={positions[d.from].x} y1={positions[d.from].y} x2={positions[d.to].x} y2={positions[d.to].y} stroke="#e2e8f0" strokeWidth="1" strokeDasharray="4,3" />
+                                    ))}
+                                    {plPcsTransitivityData.distances.filter(d => d.isAdjacent).map((d, i) => (
+                                      <line key={`adj-${i}`} x1={positions[d.from].x} y1={positions[d.from].y} x2={positions[d.to].x} y2={positions[d.to].y} stroke="#4f6ef7" strokeWidth="2.5" />
+                                    ))}
+                                    {plPcsTransitivityData.distances.map((d, i) => {
+                                      const mx = (positions[d.from].x + positions[d.to].x) / 2
+                                      const my = (positions[d.from].y + positions[d.to].y) / 2 - 8
+                                      return (
+                                        <text key={`lbl-${i}`} x={mx} y={my} textAnchor="middle" className={`text-[9px] font-mono ${d.isAdjacent ? 'fill-primary font-bold' : 'fill-slate-400'}`}>
+                                          {d.ratio >= 1 ? d.ratio.toFixed(1) : `1/${(1/d.ratio).toFixed(1)}`}
+                                        </text>
+                                      )
+                                    })}
+                                    {positions.map((pos, i) => {
+                                      const w = weighted[i]?.pct || 0
+                                      const r = Math.max(14, 10 + w * 0.3)
+                                      return (
+                                        <g key={i}>
+                                          <circle cx={pos.x} cy={pos.y} r={r} fill="#4f6ef7" fillOpacity="0.15" stroke="#4f6ef7" strokeWidth="2" />
+                                          <circle cx={pos.x} cy={pos.y} r={r - 4} fill="#4f6ef7" fillOpacity={0.1 + w * 0.008} />
+                                          <text x={pos.x} y={pos.y + 1} textAnchor="middle" dominantBaseline="middle" className="text-[9px] font-bold fill-primary">
+                                            {(plPcsTransitivityData.criteria[i].name || `C${i+1}`).slice(0, 4)}
+                                          </text>
+                                          <text x={pos.x} y={pos.y + r + 12} textAnchor="middle" className="text-[8px] font-mono fill-slate-500">
+                                            {w.toFixed(0)}%
+                                          </text>
+                                        </g>
+                                      )
+                                    })}
+                                  </>
+                                )
+                              })()}
+                            </svg>
+                          </div>
+                          <h5 className="text-[10px] font-bold text-slate-600">Reconstructed Matrix</h5>
+                          <div className="overflow-x-auto">
+                            <table className="text-[9px] font-mono">
+                              <thead><tr><th className="p-1"></th>{plPcsTransitivityData.criteria.map((c, i) => <th key={i} className="p-1 text-slate-500 font-bold">{(c.name || `C${i+1}`).slice(0, 6)}</th>)}</tr></thead>
+                              <tbody>{plPcsTransitivityData.matrix.map((row, i) => (
+                                <tr key={i}><td className="p-1 font-bold text-slate-500">{(plPcsTransitivityData.criteria[i].name || `C${i+1}`).slice(0, 6)}</td>
+                                  {row.map((val, j) => <td key={j} className={`p-1 text-center ${i === j ? 'text-slate-300' : Math.abs(i-j) === 1 ? 'text-primary font-bold bg-primary/5' : 'text-slate-500 bg-amber-50/50'}`}>{val >= 1 ? val.toFixed(1) : `1/${(1/val).toFixed(1)}`}</td>)}
+                                </tr>
+                              ))}</tbody>
+                            </table>
+                          </div>
+                          <div className="flex gap-3 text-[9px] text-slate-400">
+                            <span className="flex items-center gap-1"><span className="w-2 h-2 bg-primary/20 rounded-sm" /> Direct (adjacent)</span>
+                            <span className="flex items-center gap-1"><span className="w-2 h-2 bg-amber-100 rounded-sm" /> Derived (transitivity)</span>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Consistency Index (for pairwise/pcs) */}
+                  {plAhpResult && (plMethod === 'pairwise' || plMethod === 'pcs') && (
+                    <div className={`rounded-lg p-2.5 text-[11px] flex items-center gap-3 border ${plAhpResult.consistency.consistent ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : 'bg-red-50 border-red-200 text-red-700'}`}>
+                      <div className="font-bold">{plAhpResult.consistency.consistent ? '✓ Consistent' : '✗ Inconsistent'}</div>
+                      <div className="flex gap-3 font-mono text-[10px]">
+                        <span>λ<sub>max</sub> = {plAhpResult.consistency.lambdaMax.toFixed(3)}</span>
+                        <span>CI = {plAhpResult.consistency.ci.toFixed(4)}</span>
+                        <span>CR = {(plAhpResult.consistency.cr * 100).toFixed(1)}%</span>
+                      </div>
+                      <span className="text-[9px] opacity-70">(threshold ≤ 10%)</span>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* ── Section 3: Results (dynamic, always visible when weights exist) ── */}
+              {plCriteria.length >= 2 && plTotalWeight > 0 && (
+                <div className="space-y-3 border-t border-slate-100 pt-5">
+                  <h4 className="text-[13px] font-bold text-slate-800 flex items-center gap-2">
+                    <span className="w-5 h-5 rounded bg-primary/10 flex items-center justify-center text-[10px] font-bold text-primary">3</span>
+                    Results
+                    <span className="text-[10px] font-normal text-slate-400 ml-1">({plMethod === 'direct' ? 'Direct' : plMethod === 'likert' ? 'Likert' : plMethod === 'pairwise' ? 'AHP' : 'PCS'} · {ahpMethod === 'geometric' && (plMethod === 'pairwise' || plMethod === 'pcs') ? 'Geometric Mean' : (plMethod === 'pairwise' || plMethod === 'pcs') ? 'Eigenvector' : ''})</span>
+                  </h4>
+                  <div className="space-y-1.5">
+                    {[...plNormalized].sort((a, b) => b.pct - a.pct).map((c, i) => (
+                      <div key={c.id} className="flex items-center gap-2">
+                        <span className="text-[11px] w-5 text-right font-bold text-slate-400">{i + 1}.</span>
+                        <span className="text-[11px] w-28 truncate font-semibold text-slate-700">{c.name || '—'}</span>
+                        <div className="flex-1 bg-slate-100 rounded-full h-5 overflow-hidden relative">
+                          <div className="h-full rounded-full transition-all duration-500 ease-out" style={{ width: `${c.pct}%`, background: ALT_COLORS[i % ALT_COLORS.length] }} />
+                        </div>
+                        <span className="text-[12px] font-mono font-bold text-slate-700 w-14 text-right">{c.pct.toFixed(1)}%</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ═══ About This Tool Modal ═══ */}
       {showAbout && (
