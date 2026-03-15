@@ -172,29 +172,13 @@ const EXAMPLES = {
 }
 
 // ─── MCDA Engine ────────────────────────────────────────────────────────────────
-function computeMCDA(criteria, alternatives, scores, weightOverrides = null) {
+function computeMCDA(criteria, alternatives, scores, weightOverrides = null, normMethod = 'column-sum') {
   if (!criteria.length || !alternatives.length) return { ranking: [], normalized: {}, utilities: {}, partWorths: {}, weights: {}, koFails: {} }
   const rawW = {}; let totalW = 0
   criteria.forEach(c => { const w = weightOverrides ? (weightOverrides[c.id] ?? c.weight) : c.weight; rawW[c.id] = w; totalW += w })
   const weights = {}; criteria.forEach(c => { weights[c.id] = totalW > 0 ? rawW[c.id] / totalW : 0 })
   const normalized = {}
-  // Column-sum normalization (Spaltensummen-Normalisierung)
-  // Maximize: r_ij = x_ij / SUM(x_ij)
-  // Minimize: reciprocal first, then normalize: r_ij = (1/x_ij) / SUM(1/x_ij)
-  const colSums = {}
-  criteria.forEach(c => {
-    if (c.direction === 'minimize') {
-      // Reciprocal column sum
-      let sum = 0
-      alternatives.forEach(a => { const v = Number(scores[a.id]?.[c.id]) || 0; if (v !== 0) sum += 1 / v })
-      colSums[c.id] = sum || 1
-    } else {
-      // Direct column sum
-      let sum = 0
-      alternatives.forEach(a => { sum += Number(scores[a.id]?.[c.id]) || 0 })
-      colSums[c.id] = sum || 1
-    }
-  })
+
   // K.O. check
   const koFails = {}
   alternatives.forEach(a => {
@@ -209,21 +193,73 @@ function computeMCDA(criteria, alternatives, scores, weightOverrides = null) {
     })
     if (fails.length > 0) koFails[a.id] = fails
   })
-  alternatives.forEach(a => {
-    normalized[a.id] = {}
+
+  // ─── Normalization ───
+  if (normMethod === 'min-max') {
+    // Min-Max: best → 1, worst → 0
     criteria.forEach(c => {
-      const v = Number(scores[a.id]?.[c.id]) || 0
+      const vals = alternatives.map(a => Number(scores[a.id]?.[c.id]) || 0)
+      const mn = Math.min(...vals), mx = Math.max(...vals), range = mx - mn
+      alternatives.forEach(a => {
+        if (!normalized[a.id]) normalized[a.id] = {}
+        const v = Number(scores[a.id]?.[c.id]) || 0
+        if (range === 0) { normalized[a.id][c.id] = 1 }
+        else if (c.direction === 'minimize') { normalized[a.id][c.id] = (mx - v) / range }
+        else { normalized[a.id][c.id] = (v - mn) / range }
+      })
+    })
+  } else if (normMethod === 'max-ratio') {
+    // Max-Ratio: best → 1, others proportional
+    criteria.forEach(c => {
+      const vals = alternatives.map(a => Number(scores[a.id]?.[c.id]) || 0)
       if (c.direction === 'minimize') {
-        normalized[a.id][c.id] = v !== 0 ? (1 / v) / colSums[c.id] : 0
+        const mn = Math.min(...vals.filter(v => v > 0)) || 1
+        alternatives.forEach(a => {
+          if (!normalized[a.id]) normalized[a.id] = {}
+          const v = Number(scores[a.id]?.[c.id]) || 0
+          normalized[a.id][c.id] = v > 0 ? mn / v : 0
+        })
       } else {
-        normalized[a.id][c.id] = v / colSums[c.id]
+        const mx = Math.max(...vals) || 1
+        alternatives.forEach(a => {
+          if (!normalized[a.id]) normalized[a.id] = {}
+          const v = Number(scores[a.id]?.[c.id]) || 0
+          normalized[a.id][c.id] = v / mx
+        })
       }
     })
-  })
+  } else {
+    // Column-sum normalization (default)
+    // Maximize: r_ij = x_ij / SUM(x_ij)
+    // Minimize: (1/x_ij) / SUM(1/x_ij)
+    const colSums = {}
+    criteria.forEach(c => {
+      if (c.direction === 'minimize') {
+        let sum = 0
+        alternatives.forEach(a => { const v = Number(scores[a.id]?.[c.id]) || 0; if (v !== 0) sum += 1 / v })
+        colSums[c.id] = sum || 1
+      } else {
+        let sum = 0
+        alternatives.forEach(a => { sum += Number(scores[a.id]?.[c.id]) || 0 })
+        colSums[c.id] = sum || 1
+      }
+    })
+    alternatives.forEach(a => {
+      normalized[a.id] = {}
+      criteria.forEach(c => {
+        const v = Number(scores[a.id]?.[c.id]) || 0
+        if (c.direction === 'minimize') {
+          normalized[a.id][c.id] = v !== 0 ? (1 / v) / colSums[c.id] : 0
+        } else {
+          normalized[a.id][c.id] = v / colSums[c.id]
+        }
+      })
+    })
+  }
+
   const partWorths = {}; const utilities = {}
   alternatives.forEach(a => { partWorths[a.id] = {}; let t = 0; criteria.forEach(c => { const pw = normalized[a.id][c.id] * weights[c.id]; partWorths[a.id][c.id] = pw; t += pw }); utilities[a.id] = t })
   const ranking = alternatives.map(a => ({ id: a.id, name: a.name, utility: utilities[a.id], partWorths: partWorths[a.id], normalized: normalized[a.id], koFailed: !!koFails[a.id] })).sort((a, b) => {
-    // K.O. failed alternatives always rank last
     if (a.koFailed && !b.koFailed) return 1
     if (!a.koFailed && b.koFailed) return -1
     return b.utility - a.utility
@@ -231,16 +267,16 @@ function computeMCDA(criteria, alternatives, scores, weightOverrides = null) {
   return { ranking, normalized, utilities, partWorths, weights, koFails }
 }
 
-function runFullSensitivity(criteria, alternatives, scores) {
+function runFullSensitivity(criteria, alternatives, scores, normMethod = 'column-sum') {
   if (criteria.length < 2 || alternatives.length < 2) return []
-  const base = computeMCDA(criteria, alternatives, scores)
+  const base = computeMCDA(criteria, alternatives, scores, null, normMethod)
   const bw = base.ranking[0]; if (!bw) return []
   return criteria.map(tc => {
     const oc = criteria.filter(c => c.id !== tc.id); const ot = oc.reduce((s, c) => s + c.weight, 0)
     const sweep = []; let bp = null; let bpw = null
     for (let w = 0; w <= 100; w++) {
       const ov = {}; oc.forEach(c => { ov[c.id] = ot > 0 ? (c.weight / ot) * (100 - w) : (100 - w) / oc.length }); ov[tc.id] = w
-      const r = computeMCDA(criteria, alternatives, scores, ov); const pt = { weight: w }
+      const r = computeMCDA(criteria, alternatives, scores, ov, normMethod); const pt = { weight: w }
       r.ranking.forEach(x => { pt[x.name] = Math.round(x.utility * 1000) / 10 }); sweep.push(pt)
       if (r.ranking[0]?.id !== bw.id && bp === null) { bp = w; bpw = r.ranking[0]?.name }
     }
@@ -248,10 +284,10 @@ function runFullSensitivity(criteria, alternatives, scores) {
   })
 }
 
-function runMultiCriteriaSensitivity(criteria, alternatives, scores, selectedIds) {
+function runMultiCriteriaSensitivity(criteria, alternatives, scores, selectedIds, normMethod = 'column-sum') {
   if (criteria.length < 2 || alternatives.length < 2 || selectedIds.length < 2) return null
   const N = 2000
-  const base = computeMCDA(criteria, alternatives, scores)
+  const base = computeMCDA(criteria, alternatives, scores, null, normMethod)
   const baseWinnerId = base.ranking[0]?.id
   const winCount = {}
   alternatives.forEach(a => { winCount[a.id] = { id: a.id, name: a.name, count: 0 } })
@@ -274,7 +310,7 @@ function runMultiCriteriaSensitivity(criteria, alternatives, scores, selectedIds
         overrides[c.id] = fixedOrigTotal > 0 ? (c.weight / fixedOrigTotal) * fixedShare : fixedShare / fixedCriteria.length
       })
     }
-    const result = computeMCDA(criteria, alternatives, scores, overrides)
+    const result = computeMCDA(criteria, alternatives, scores, overrides, normMethod)
     const winner = result.ranking[0]?.id
     if (winner) winCount[winner].count++
     if (winner !== baseWinnerId) flipCount++
@@ -300,11 +336,11 @@ function getCombinations(arr, k) {
   return result
 }
 
-function runCombinationSweep(criteria, alternatives, scores, selectedIds, step = 5) {
+function runCombinationSweep(criteria, alternatives, scores, selectedIds, step = 5, normMethod = 'column-sum') {
   const selected = criteria.filter(c => selectedIds.includes(c.id))
   const fixed = criteria.filter(c => !selectedIds.includes(c.id))
   const fixedTotal = fixed.reduce((s, c) => s + c.weight, 0)
-  const base = computeMCDA(criteria, alternatives, scores)
+  const base = computeMCDA(criteria, alternatives, scores, null, normMethod)
   const baseWinnerId = base.ranking[0]?.id
   const k = selected.length
   if (k < 2) return null
@@ -318,7 +354,7 @@ function runCombinationSweep(criteria, alternatives, scores, selectedIds, step =
       const ov = {}
       selected.forEach((c, i) => { ov[c.id] = w[i] })
       fixed.forEach(c => { ov[c.id] = fixedTotal > 0 ? (c.weight / fixedTotal) * rem : rem / Math.max(fixed.length, 1) })
-      const r = computeMCDA(criteria, alternatives, scores, ov)
+      const r = computeMCDA(criteria, alternatives, scores, ov, normMethod)
       const winner = r.ranking[0]
       totalCells++
       if (winner) winCount[winner.id].count++
@@ -425,6 +461,8 @@ export default function App() {
   const [showPartWorths, setShowPartWorths] = useState(false)
   const [expandedDualPairs, setExpandedDualPairs] = useState({})
   const [showAbout, setShowAbout] = useState(false)
+  const [normMethod, setNormMethod] = useState('min-max') // 'column-sum' | 'min-max' | 'max-ratio'
+  const [showNormInfo, setShowNormInfo] = useState(false)
   const [showPrefLab, setShowPrefLab] = useState(false)
   const [showCsvDialog, setShowCsvDialog] = useState(null) // null | 'export' | 'import'
   const [csvDelimiter, setCsvDelimiter] = useState(',') // ',' | ';'
@@ -463,7 +501,7 @@ export default function App() {
     analysis: scoringComplete,
   }), [hasProblem, hasCriteria, hasAlternatives, scoringComplete])
 
-  const mcda = useMemo(() => computeMCDA(criteria, alternatives, scores), [criteria, alternatives, scores])
+  const mcda = useMemo(() => computeMCDA(criteria, alternatives, scores, null, normMethod), [criteria, alternatives, scores, normMethod])
   const totalWeight = criteria.reduce((s, c) => s + c.weight, 0)
   const normalizedWeights = useMemo(() => {
     const t = criteria.reduce((s, c) => s + c.weight, 0)
@@ -693,7 +731,7 @@ export default function App() {
     const crit = criteria.map(c => ({ ...c }))
     const alts = alternatives.map(a => ({ ...a }))
     const scr = JSON.parse(JSON.stringify(scores))
-    const base = computeMCDA(crit, alts, scr)
+    const base = computeMCDA(crit, alts, scr, null, normMethod)
     const baseWinnerId = base.ranking[0]?.id
     const baseName = base.ranking[0]?.name
     const totalSims = mcSimCount
@@ -721,7 +759,7 @@ export default function App() {
           const ft = fc.reduce((a, c) => a + c.weight, 0)
           fc.forEach(c => { ov[c.id] = ft > 0 ? (c.weight / ft) * fs : fs / fc.length })
         }
-        const r = computeMCDA(crit, alts, scr, ov)
+        const r = computeMCDA(crit, alts, scr, ov, normMethod)
         const w = r.ranking[0]?.id
         if (w) wc[w].count++
         if (w !== baseWinnerId) flipCount++
@@ -745,7 +783,7 @@ export default function App() {
     const results = []
     for (let i = 0; i < criteria.length; i++) {
       for (let j = i + 1; j < criteria.length; j++) {
-        const r = runCombinationSweep(criteria, alternatives, scores, [criteria[i].id, criteria[j].id], sensStep)
+        const r = runCombinationSweep(criteria, alternatives, scores, [criteria[i].id, criteria[j].id], sensStep, normMethod)
         if (r) results.push(r)
       }
     }
@@ -776,7 +814,7 @@ export default function App() {
         return
       }
       const combo = allCombos[idx]
-      const result = runCombinationSweep(crit, alts, scr, combo, step)
+      const result = runCombinationSweep(crit, alts, scr, combo, step, normMethod)
       if (result) results.push(result)
       idx++
       const sorted = [...results].sort((a, b) => parseFloat(a.baseWinPct) - parseFloat(b.baseWinPct))
@@ -839,7 +877,7 @@ export default function App() {
   const exportCSV = () => {
     if (!criteria.length || !alternatives.length) return
     const d = csvDelimiter
-    const res = computeMCDA(criteria, alternatives, scores)
+    const res = computeMCDA(criteria, alternatives, scores, null, normMethod)
     const esc = (v) => { const s = String(v ?? ''); return s.includes(d) || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g, '""')}"` : s }
     const lines = []
     const totalW = criteria.reduce((s, c) => s + (c.weight || 0), 0) || 1
@@ -1740,6 +1778,54 @@ export default function App() {
                           </div>
                         )}
 
+                        {/* Normalization method selector */}
+                        <div className="bg-white border border-slate-200 rounded-xl p-3 flex items-center gap-3 flex-wrap">
+                          <span className="text-[11px] font-semibold text-slate-600 shrink-0">Normalization:</span>
+                          <div className="flex gap-1">
+                            {[
+                              { v: 'column-sum', label: 'Column-Sum', tip: 'x/Σx — utilities sum to 1.0' },
+                              { v: 'min-max', label: 'Min-Max', tip: 'Best→1, Worst→0 — max spread' },
+                              { v: 'max-ratio', label: 'Max-Ratio', tip: 'x/max — best=1, rest proportional' },
+                            ].map(o => (
+                              <button key={o.v} title={o.tip} onClick={() => { setNormMethod(o.v); setSensitivityResults(null) }} className={`px-2.5 py-1 text-[10px] rounded-lg font-medium transition ${normMethod === o.v ? 'bg-primary text-white shadow-sm' : 'text-slate-500 border border-slate-200 hover:bg-slate-50'}`}>
+                                {o.label}
+                              </button>
+                            ))}
+                          </div>
+                          <button onClick={() => setShowNormInfo(!showNormInfo)} className="ml-auto text-slate-400 hover:text-primary transition" title="About normalization methods">
+                            <Info size={14} />
+                          </button>
+                        </div>
+
+                        {showNormInfo && (
+                          <div className="bg-blue-50 border border-blue-100 rounded-xl p-4 space-y-3 text-[11px] text-slate-600">
+                            <h4 className="text-xs font-bold text-slate-700">Normalization Methods</h4>
+                            <div className="text-[11px] text-slate-600 bg-white rounded-lg p-3 border border-slate-200 leading-relaxed">
+                              All three methods convert raw scores (which may have different units and scales) into comparable values between 0 and 1. <strong>The ranking of alternatives can change</strong> depending on the method — each one emphasizes different aspects of the data. When the winner is clear, all methods typically agree. In close races, try switching methods to test how robust the result is. If the ranking stays the same across all three, the decision is well-supported.
+                            </div>
+                            <div className="space-y-3">
+                              <div className="bg-white rounded-lg p-3 border border-blue-100">
+                                <div className="mb-1"><strong className="text-primary">Column-Sum</strong> <span className="font-mono text-[10px] text-slate-400 ml-1">Max: x/Σx · Min: (1/x)/Σ(1/x)</span></div>
+                                <div className="text-slate-500 mb-1.5">Each score is divided by the column total. Utilities sum to 1.0 across alternatives.</div>
+                                <div className="text-[10px] text-emerald-700 bg-emerald-50 rounded px-2 py-1 inline-block"><strong>Best for:</strong> Comparing market shares or proportional resource allocation. When you need to know "what fraction of total value does each alternative capture?" Ideal when absolute score magnitudes matter (e.g. revenue, cost).</div>
+                                <div className="text-[10px] text-amber-700 bg-amber-50 rounded px-2 py-1 inline-block mt-1"><strong>Caveat:</strong> Adding or removing alternatives changes all normalized values. Differences compress with many alternatives (each clusters around 1/N).</div>
+                              </div>
+                              <div className="bg-white rounded-lg p-3 border border-blue-100">
+                                <div className="mb-1"><strong className="text-primary">Min-Max</strong> <span className="font-mono text-[10px] text-slate-400 ml-1">Max: (x−min)/(max−min) · Min: (max−x)/(max−min)</span></div>
+                                <div className="text-slate-500 mb-1.5">Scales each criterion to [0, 1]. Best gets 1.0, worst gets 0.0. Utilities do NOT sum to 1.0.</div>
+                                <div className="text-[10px] text-emerald-700 bg-emerald-50 rounded px-2 py-1 inline-block"><strong>Best for:</strong> General-purpose decision-making with heterogeneous criteria (different units and scales). Maximizes visible spread between alternatives. Recommended default when you want the clearest differentiation.</div>
+                                <div className="text-[10px] text-amber-700 bg-amber-50 rounded px-2 py-1 inline-block mt-1"><strong>Caveat:</strong> The worst alternative always gets 0 on each criterion — relative distances can appear exaggerated. Sensitive to outliers.</div>
+                              </div>
+                              <div className="bg-white rounded-lg p-3 border border-blue-100">
+                                <div className="mb-1"><strong className="text-primary">Max-Ratio</strong> <span className="font-mono text-[10px] text-slate-400 ml-1">Max: x/max · Min: min/x</span></div>
+                                <div className="text-slate-500 mb-1.5">Each score is divided by the best value. Best gets 1.0 per criterion, others proportionally less. Utilities do NOT sum to 1.0.</div>
+                                <div className="text-[10px] text-emerald-700 bg-emerald-50 rounded px-2 py-1 inline-block"><strong>Best for:</strong> Benchmarking against a reference (the best performer). When you want to answer "how close is each alternative to the ideal?" Preserves proportional distances — a score of 0.5 means genuinely half as good.</div>
+                                <div className="text-[10px] text-amber-700 bg-amber-50 rounded px-2 py-1 inline-block mt-1"><strong>Caveat:</strong> The worst alternative does NOT get 0 (unlike Min-Max), so differences appear smaller. If all alternatives are similar, values cluster near 1.0.</div>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+
                         {/* Combined stacked bar chart */}
                         <div className="bg-slate-50 rounded-xl p-4">
                           <div className="flex items-center justify-between mb-3">
@@ -1830,7 +1916,7 @@ export default function App() {
                         )}
 
                         <div className="bg-blue-50 border border-blue-100 rounded-lg p-2 text-[10px] text-blue-600 flex items-start gap-1.5">
-                          <Info size={11} className="shrink-0 mt-0.5" /><span><strong>Method:</strong> Column-sum normalization. Maximize: x/Σx. Minimize: (1/x)/Σ(1/x). Utility = Σ(w × r). All utilities sum to 1.0.</span>
+                          <Info size={11} className="shrink-0 mt-0.5" /><span><strong>Method:</strong> {normMethod === 'column-sum' ? 'Column-sum normalization. Maximize: x/Σx. Minimize: (1/x)/Σ(1/x). Utility = Σ(w × r). All utilities sum to 1.0.' : normMethod === 'min-max' ? 'Min-Max normalization. Max: (x−min)/(max−min). Min: (max−x)/(max−min). Utility = Σ(w × r). Best=1, Worst=0 per criterion.' : 'Max-Ratio normalization. Max: x/max. Min: min/x. Utility = Σ(w × r). Best=1 per criterion, rest proportional.'}</span>
                         </div>
                       </div>
                     )}
@@ -1874,7 +1960,7 @@ export default function App() {
                         {analysisTab === 'oat' && (
                           <div className="space-y-4">
                             <p className="text-[11px] text-slate-400">Sweeps <strong>one criterion at a time</strong> from 0→100% (step: {sensStep}%). Others scale proportionally. Detects where ranking flips.</p>
-                            <button onClick={() => setSensitivityResults(runFullSensitivity(criteria, alternatives, scores))} className="flex items-center gap-2 px-4 py-2 bg-primary text-white rounded-lg text-xs font-semibold hover:bg-primary/90 transition shadow-sm">
+                            <button onClick={() => setSensitivityResults(runFullSensitivity(criteria, alternatives, scores, normMethod))} className="flex items-center gap-2 px-4 py-2 bg-primary text-white rounded-lg text-xs font-semibold hover:bg-primary/90 transition shadow-sm">
                               <Zap size={14} /> Run Single-Criterion Sweep
                             </button>
                             {sensitivityResults && (<>
