@@ -7,7 +7,8 @@ import {
   Plus, Trash2, Upload, Download, ChevronDown, Trophy, Info, X,
   TrendingUp, TrendingDown, Zap, Target, GripVertical,
   ChevronRight, ChevronUp, Sliders, Lock, Minus, Shuffle,
-  Eye, EyeOff, BookOpen, BarChart3, Shield, Sparkles
+  Eye, EyeOff, BookOpen, BarChart3, Shield, Sparkles,
+  FileSpreadsheet, AlertTriangle, CheckCircle
 } from 'lucide-react'
 
 // ─── Constants ──────────────────────────────────────────────────────────────────
@@ -176,10 +177,23 @@ function computeMCDA(criteria, alternatives, scores, weightOverrides = null) {
   const rawW = {}; let totalW = 0
   criteria.forEach(c => { const w = weightOverrides ? (weightOverrides[c.id] ?? c.weight) : c.weight; rawW[c.id] = w; totalW += w })
   const weights = {}; criteria.forEach(c => { weights[c.id] = totalW > 0 ? rawW[c.id] / totalW : 0 })
-  const normalized = {}; const mm = {}
+  const normalized = {}
+  // Column-sum normalization (Spaltensummen-Normalisierung)
+  // Maximize: r_ij = x_ij / SUM(x_ij)
+  // Minimize: reciprocal first, then normalize: r_ij = (1/x_ij) / SUM(1/x_ij)
+  const colSums = {}
   criteria.forEach(c => {
-    const vals = alternatives.map(a => Number(scores[a.id]?.[c.id]) || 0)
-    mm[c.id] = { min: Math.min(...vals), max: Math.max(...vals), range: Math.max(...vals) - Math.min(...vals) || 1 }
+    if (c.direction === 'minimize') {
+      // Reciprocal column sum
+      let sum = 0
+      alternatives.forEach(a => { const v = Number(scores[a.id]?.[c.id]) || 0; if (v !== 0) sum += 1 / v })
+      colSums[c.id] = sum || 1
+    } else {
+      // Direct column sum
+      let sum = 0
+      alternatives.forEach(a => { sum += Number(scores[a.id]?.[c.id]) || 0 })
+      colSums[c.id] = sum || 1
+    }
   })
   // K.O. check
   const koFails = {}
@@ -197,7 +211,14 @@ function computeMCDA(criteria, alternatives, scores, weightOverrides = null) {
   })
   alternatives.forEach(a => {
     normalized[a.id] = {}
-    criteria.forEach(c => { const n = (Number(scores[a.id]?.[c.id] || 0) - mm[c.id].min) / mm[c.id].range; normalized[a.id][c.id] = c.direction === 'minimize' ? 1 - n : n })
+    criteria.forEach(c => {
+      const v = Number(scores[a.id]?.[c.id]) || 0
+      if (c.direction === 'minimize') {
+        normalized[a.id][c.id] = v !== 0 ? (1 / v) / colSums[c.id] : 0
+      } else {
+        normalized[a.id][c.id] = v / colSums[c.id]
+      }
+    })
   })
   const partWorths = {}; const utilities = {}
   alternatives.forEach(a => { partWorths[a.id] = {}; let t = 0; criteria.forEach(c => { const pw = normalized[a.id][c.id] * weights[c.id]; partWorths[a.id][c.id] = pw; t += pw }); utilities[a.id] = t })
@@ -405,6 +426,14 @@ export default function App() {
   const [expandedDualPairs, setExpandedDualPairs] = useState({})
   const [showAbout, setShowAbout] = useState(false)
   const [showPrefLab, setShowPrefLab] = useState(false)
+  const [showCsvDialog, setShowCsvDialog] = useState(null) // null | 'export' | 'import'
+  const [csvDelimiter, setCsvDelimiter] = useState(',') // ',' | ';'
+  const [csvDecimal, setCsvDecimal] = useState('.') // '.' | ','
+  const [csvFilename, setCsvFilename] = useState('')
+  const [csvImportErrors, setCsvImportErrors] = useState([])
+  const [csvImportPreview, setCsvImportPreview] = useState(null)
+  const [csvRawText, setCsvRawText] = useState(null)
+  const csvFileRef = useRef(null)
   // Preference Lab — independent criteria weighting
   const [plCriteria, setPlCriteria] = useState([])
   const [plMethod, setPlMethod] = useState('direct')
@@ -766,9 +795,223 @@ export default function App() {
 
   // ─── Load / Export ──────────────────────────────────────────────────────────
   const loadExample = (k) => { const e = EXAMPLES[k]; setTitle(e.title || ''); setProblem(e.problem); setCriteria(e.criteria.map(c => ({ ...c }))); setAlternatives(e.alternatives.map(a => ({ ...a }))); setScores(JSON.parse(JSON.stringify(e.scores))); setSensitivityResults(null); setLikertRatings({}); setPairAnswers({}); setPcsAnswers({}); setExampleOpen(false) }
-  const exportJSON = () => { const b = new Blob([JSON.stringify({ v: 2, title, problem, criteria, alternatives, scores }, null, 2)], { type: 'application/json' }); const u = URL.createObjectURL(b); const a = document.createElement('a'); a.href = u; a.download = 'mcda.json'; a.click(); URL.revokeObjectURL(u) }
-  const fileRef = useRef(null)
-  const importJSON = (e) => { const f = e.target.files?.[0]; if (!f) return; const r = new FileReader(); r.onload = (ev) => { try { const d = JSON.parse(ev.target.result); setTitle(d.title || ''); setProblem(d.problem || ''); setCriteria(d.criteria || []); setAlternatives(d.alternatives || []); setScores(d.scores || {}); setSensitivityResults(null); setLikertRatings({}); setPairAnswers({}); setPcsAnswers({}) } catch { alert('Invalid JSON') } }; r.readAsText(f); e.target.value = '' }
+  const downloadCsvTemplate = () => {
+    const d = csvDelimiter
+    const esc = (v) => { const s = String(v ?? ''); return s.includes(d) || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g, '""')}"` : s }
+    const tplAlts = ['Option A', 'Option B', 'Option C']
+    const tplRows = [
+      { name: 'Quality', dir: 'maximize', w: 30, scores: [8, 6, 7] },
+      { name: 'Price', dir: 'minimize', w: 25, scores: [500, 350, 420] },
+      { name: 'Delivery Time (days)', dir: 'minimize', w: 20, scores: [5, 10, 7] },
+      { name: 'Support Rating', dir: 'maximize', w: 15, scores: [4, 5, 3] },
+      { name: 'Sustainability', dir: 'maximize', w: 10, scores: [7, 8, 9] },
+    ]
+    const hdr = ['Criterion', 'Direction', 'Weight (abs)']
+    tplAlts.forEach(n => hdr.push(`${n} [Score]`))
+    const lines = [hdr.map(esc).join(d)]
+    tplRows.forEach(r => {
+      const row = [r.name, r.dir, fmtNum(r.w)]
+      r.scores.forEach(s => row.push(fmtNum(s)))
+      lines.push(row.map(esc).join(d))
+    })
+    const blob = new Blob(['\uFEFF' + lines.join('\n')], { type: 'text/csv;charset=utf-8' })
+    const u = URL.createObjectURL(blob)
+    const fname = 'mcda_template.csv'
+    const a = document.createElement('a'); a.href = u; a.download = fname; a.click()
+    URL.revokeObjectURL(u)
+  }
+
+  // ─── CSV Export ────────────────────────────────────────────────────────────
+  const csvDefaultFilename = () => {
+    const now = new Date()
+    const pad = (n) => String(n).padStart(2, '0')
+    const d = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}_${pad(now.getHours())}-${pad(now.getMinutes())}`
+    const slug = (title || 'mcda').trim().toLowerCase().replace(/[^a-z0-9äöüß]+/gi, '_').replace(/^_|_$/g, '')
+    return `${d}_${slug}`
+  }
+
+  const fmtNum = (v) => {
+    if (v === '' || v == null) return ''
+    const s = String(v)
+    return csvDecimal === ',' ? s.replace('.', ',') : s
+  }
+
+  const exportCSV = () => {
+    if (!criteria.length || !alternatives.length) return
+    const d = csvDelimiter
+    const res = computeMCDA(criteria, alternatives, scores)
+    const esc = (v) => { const s = String(v ?? ''); return s.includes(d) || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g, '""')}"` : s }
+    const lines = []
+    const totalW = criteria.reduce((s, c) => s + (c.weight || 0), 0) || 1
+    const hdr = ['Criterion', 'Direction', 'Weight (abs)', 'Weight (rel)']
+    alternatives.forEach(a => hdr.push(`${a.name} [Score]`))
+    alternatives.forEach(a => hdr.push(`${a.name} [Part Worth]`))
+    lines.push(hdr.map(esc).join(d))
+    criteria.forEach(c => {
+      const row = [c.name, c.direction, fmtNum(c.weight), fmtNum(Math.round((c.weight / totalW) * 10000) / 10000)]
+      alternatives.forEach(a => row.push(fmtNum(scores[a.id]?.[c.id] ?? '')))
+      alternatives.forEach(a => row.push(res.partWorths[a.id]?.[c.id] != null ? fmtNum(Math.round(res.partWorths[a.id][c.id] * 10000) / 10000) : ''))
+      lines.push(row.map(esc).join(d))
+    })
+    const sumRow = ['SUM', '', fmtNum(criteria.reduce((s, c) => s + (c.weight || 0), 0)), fmtNum(1)]
+    alternatives.forEach(() => sumRow.push(''))
+    alternatives.forEach(a => sumRow.push(res.utilities[a.id] != null ? fmtNum(Math.round(res.utilities[a.id] * 10000) / 10000) : ''))
+    lines.push(sumRow.map(esc).join(d))
+    const blob = new Blob(['\uFEFF' + lines.join('\n')], { type: 'text/csv;charset=utf-8' })
+    const u = URL.createObjectURL(blob)
+    const fname = (csvFilename.trim() || csvDefaultFilename()) + '.csv'
+    const a = document.createElement('a'); a.href = u; a.download = fname; a.click()
+    URL.revokeObjectURL(u)
+  }
+
+  // ─── CSV Import ────────────────────────────────────────────────────────────
+  const parseCSV = (text, delim) => {
+    // CSV parser handling quoted fields with configurable delimiter
+    const rows = []; let cur = []; let field = ''; let inQ = false
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i]
+      if (inQ) {
+        if (ch === '"' && text[i + 1] === '"') { field += '"'; i++ }
+        else if (ch === '"') inQ = false
+        else field += ch
+      } else {
+        if (ch === '"') inQ = true
+        else if (ch === delim) { cur.push(field.trim()); field = '' }
+        else if (ch === '\n' || ch === '\r') {
+          if (ch === '\r' && text[i + 1] === '\n') i++
+          cur.push(field.trim()); field = ''
+          if (cur.some(c => c !== '')) rows.push(cur)
+          cur = []
+        } else field += ch
+      }
+    }
+    cur.push(field.trim())
+    if (cur.some(c => c !== '')) rows.push(cur)
+    return rows
+  }
+
+  const validateAndPreviewCSV = (text, delim, dec) => {
+    const errors = []
+    const usedDelim = delim || csvDelimiter
+    const usedDec = dec || csvDecimal
+    const parseNum = (s) => { if (s == null || s === '') return NaN; return parseFloat(usedDec === ',' ? s.replace(',', '.') : s) }
+    const rows = parseCSV(text, usedDelim)
+    if (rows.length < 2) { errors.push('CSV must have at least a header row and one data row.'); return { errors } }
+    const hdr = rows[0]
+    // Detect structure: find [Score] and [Part Worth] columns
+    const scoreIdx = []; const pwIdx = []; const altNamesScore = []; const altNamesPW = []
+    // Find the primary weight column index and detect abs/rel
+    let weightColIdx = -1; let weightIsRel = false
+    hdr.forEach((h, i) => {
+      if (i >= 2 && weightColIdx === -1 && /weight/i.test(h)) {
+        weightColIdx = i
+        weightIsRel = /rel/i.test(h)
+      }
+    })
+    if (weightColIdx === -1) weightColIdx = 2 // fallback
+    // Detect additional weight columns to skip
+    const skipCols = new Set([0, 1, weightColIdx])
+    hdr.forEach((h, i) => { if (i !== weightColIdx && /weight/i.test(h) && !/\[/.test(h)) skipCols.add(i) })
+    hdr.forEach((h, i) => {
+      if (skipCols.has(i)) return
+      const m = h.match(/^(.+?)\s*\[Score\]\s*$/i)
+      if (m) { scoreIdx.push(i); altNamesScore.push(m[1].trim()); return }
+      const mp = h.match(/^(.+?)\s*\[Part Worth\]\s*$/i)
+      if (mp) { pwIdx.push(i); altNamesPW.push(mp[1].trim()); return }
+    })
+    if (scoreIdx.length === 0) errors.push('No alternative score columns found. Headers must contain "[Score]" suffix, e.g. "Apartment A [Score]".')
+    if (hdr.length < 4) errors.push('Header must have at least 4 columns: Criterion, Direction, Weight, and at least one alternative score.')
+    if (!hdr[0]?.match(/criterion/i)) errors.push(`First column header should be "Criterion" (found "${hdr[0]}").`)
+    if (!hdr[1]?.match(/direction/i)) errors.push(`Second column header should be "Direction" (found "${hdr[1]}").`)
+    if (weightColIdx >= 0 && !hdr[weightColIdx]?.match(/weight/i)) errors.push(`Weight column header should contain "Weight" (found "${hdr[weightColIdx]}").`)
+    // Parse data rows (skip SUM row)
+    const dataRows = rows.slice(1).filter(r => !r[0]?.match(/^sum$/i))
+    if (dataRows.length === 0) errors.push('No criterion data rows found.')
+    const parsedCriteria = []; const parsedScores = {}; const parsedPW = {}
+    const altIds = altNamesScore.map((_, i) => `a${i + 1}`)
+    altIds.forEach(id => { parsedScores[id] = {}; parsedPW[id] = {} })
+    dataRows.forEach((row, ri) => {
+      const name = row[0] || ''
+      if (!name) errors.push(`Row ${ri + 2}: Criterion name is empty.`)
+      const dir = (row[1] || '').toLowerCase()
+      if (dir !== 'maximize' && dir !== 'minimize') errors.push(`Row ${ri + 2}: Direction must be "maximize" or "minimize" (found "${row[1] || ''}").`)
+      const wRaw = parseNum(row[weightColIdx])
+      if (isNaN(wRaw) || wRaw < 0) errors.push(`Row ${ri + 2}: Weight must be a non-negative number (found "${row[weightColIdx] || ''}").`)
+      // If relative weights (0-1 range), scale to absolute (×100)
+      const w = isNaN(wRaw) ? 0 : (weightIsRel && wRaw <= 1 ? wRaw * 100 : wRaw)
+      const cId = `c${ri + 1}`
+      parsedCriteria.push({ id: cId, name, direction: dir === 'minimize' ? 'minimize' : 'maximize', weight: w })
+      scoreIdx.forEach((si, ai) => {
+        const v = row[si]
+        if (v === undefined || v === '') errors.push(`Row ${ri + 2}: Score missing for "${altNamesScore[ai]}".`)
+        else {
+          const num = parseNum(v)
+          if (isNaN(num)) errors.push(`Row ${ri + 2}: Score for "${altNamesScore[ai]}" is not a number ("${v}").`)
+          else parsedScores[altIds[ai]][cId] = num
+        }
+      })
+      pwIdx.forEach((pi, ai) => {
+        const v = row[pi]
+        if (v !== undefined && v !== '') parsedPW[altIds[ai]][cId] = parseNum(v)
+      })
+    })
+    const parsedAlts = altNamesScore.map((name, i) => ({ id: altIds[i], name, description: '' }))
+    return { errors, criteria: parsedCriteria, alternatives: parsedAlts, scores: parsedScores, partWorths: parsedPW, altCount: altNamesScore.length, critCount: dataRows.length, hasPW: pwIdx.length > 0 }
+  }
+
+  const detectDelimiter = (text) => {
+    const firstLine = text.split('\n')[0] || ''
+    const semis = (firstLine.match(/;/g) || []).length
+    const commas = (firstLine.match(/,/g) || []).length
+    return semis > commas ? ';' : ','
+  }
+
+  const revalidateCsv = (text, delim, dec) => {
+    const result = validateAndPreviewCSV(text, delim, dec)
+    setCsvImportErrors(result.errors || [])
+    if (result.errors?.length === 0) setCsvImportPreview(result)
+    else setCsvImportPreview(null)
+  }
+
+  const handleCsvImportText = (text) => {
+    const detected = detectDelimiter(text)
+    const detectedDec = detected === ';' ? ',' : '.'
+    setCsvDelimiter(detected)
+    setCsvDecimal(detectedDec)
+    setCsvRawText(text)
+    revalidateCsv(text, detected, detectedDec)
+  }
+
+  const handleCsvFileSelect = (e) => {
+    const f = e.target.files?.[0]; if (!f) return
+    setCsvImportFilename(f.name || '')
+    const r = new FileReader()
+    r.onload = (ev) => { handleCsvImportText(ev.target.result) }
+    r.readAsText(f)
+    e.target.value = ''
+  }
+
+  const [csvImportFilename, setCsvImportFilename] = useState('')
+
+  const applyCsvImport = () => {
+    if (!csvImportPreview) return
+    setCriteria(csvImportPreview.criteria)
+    setAlternatives(csvImportPreview.alternatives)
+    setScores(csvImportPreview.scores)
+    // Auto-generate a title from imported alternatives
+    if (!title.trim()) {
+      const altNames = csvImportPreview.alternatives.map(a => a.name)
+      let genTitle = 'Decision: '
+      if (altNames.length <= 3) {
+        genTitle += altNames.join(', ')
+      } else {
+        genTitle += altNames.slice(0, 3).join(', ') + ` (+${altNames.length - 3} more)`
+      }
+      setTitle(genTitle)
+    }
+    setSensitivityResults(null); setLikertRatings({}); setPairAnswers({}); setPcsAnswers({})
+    setShowCsvDialog(null); setCsvImportPreview(null); setCsvImportErrors([]); setCsvRawText(null); setCsvFilename(''); setCsvImportFilename('')
+  }
 
   const scrollTo = (id) => { if (!unlocked[id]) return; sectionRefs.current[id]?.scrollIntoView({ behavior: 'smooth', block: 'start' }) }
   const sectionIdx = SECTIONS.findIndex(s => s.id === activeSection)
@@ -819,9 +1062,7 @@ export default function App() {
             )}
           </div>
           <div className="flex items-center gap-1.5 shrink-0">
-            <input ref={fileRef} type="file" accept=".json" onChange={importJSON} className="hidden" />
-            <button onClick={() => fileRef.current?.click()} className="px-2 py-1 text-[11px] text-slate-500 hover:text-slate-700 border border-slate-200 rounded-md hover:bg-slate-50 transition flex items-center gap-1"><Upload size={11} /> Import</button>
-            <button onClick={exportJSON} className="px-2 py-1 text-[11px] text-slate-500 hover:text-slate-700 border border-slate-200 rounded-md hover:bg-slate-50 transition flex items-center gap-1"><Download size={11} /> Export</button>
+            <button onClick={() => { setShowCsvDialog('export'); setCsvImportErrors([]); setCsvImportPreview(null) }} className="px-2 py-1 text-[11px] text-emerald-600 hover:text-emerald-700 border border-emerald-200 rounded-md hover:bg-emerald-50 transition flex items-center gap-1"><FileSpreadsheet size={11} /> CSV</button>
             <button onClick={() => setShowAbout(true)} className="px-2 py-1 text-[11px] text-primary hover:text-primary/80 border border-primary/20 rounded-md hover:bg-primary/5 transition flex items-center gap-1 sm:hidden"><BookOpen size={11} /></button>
             <div className="relative" ref={exRef}>
               <button onClick={() => setExampleOpen(!exampleOpen)} className="px-2 py-1 text-[11px] text-slate-500 hover:text-slate-700 border border-slate-200 rounded-md hover:bg-slate-50 transition flex items-center gap-1">Examples <ChevronDown size={11} /></button>
@@ -1589,7 +1830,7 @@ export default function App() {
                         )}
 
                         <div className="bg-blue-50 border border-blue-100 rounded-lg p-2 text-[10px] text-blue-600 flex items-start gap-1.5">
-                          <Info size={11} className="shrink-0 mt-0.5" /><span><strong>Method:</strong> Min-max normalization [0,1]. Utility = Σ(norm × weight). Part-worth = each criterion's weighted utility contribution.</span>
+                          <Info size={11} className="shrink-0 mt-0.5" /><span><strong>Method:</strong> Column-sum normalization. Maximize: x/Σx. Minimize: (1/x)/Σ(1/x). Utility = Σ(w × r). All utilities sum to 1.0.</span>
                         </div>
                       </div>
                     )}
@@ -2319,6 +2560,217 @@ export default function App() {
         </div>
       )}
 
+      {/* ═══ CSV Import / Export Dialog ═══ */}
+      {showCsvDialog && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={() => { setShowCsvDialog(null); setCsvImportErrors([]); setCsvImportPreview(null); setCsvRawText(null); setCsvFilename('') }}>
+          <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full mx-4 max-h-[85vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+            {/* Header */}
+            <div className="sticky top-0 bg-white border-b border-slate-200 rounded-t-2xl px-6 py-4 flex items-center justify-between z-10">
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-xl bg-emerald-50 flex items-center justify-center"><FileSpreadsheet size={18} className="text-emerald-600" /></div>
+                <div>
+                  <h3 className="text-base font-bold text-slate-800">CSV Import / Export</h3>
+                  <p className="text-[11px] text-slate-500">Comma-separated values — compatible with Excel, Google Sheets, Numbers</p>
+                </div>
+              </div>
+              <button onClick={() => { setShowCsvDialog(null); setCsvImportErrors([]); setCsvImportPreview(null); setCsvRawText(null); setCsvFilename('') }} className="text-slate-400 hover:text-slate-600 transition"><X size={18} /></button>
+            </div>
+
+            {/* Tabs */}
+            <div className="px-6 pt-3 flex gap-1">
+              <button onClick={() => { setShowCsvDialog('export'); setCsvImportErrors([]); setCsvImportPreview(null) }} className={`px-4 py-1.5 text-xs font-semibold rounded-lg transition ${showCsvDialog === 'export' ? 'bg-emerald-100 text-emerald-700' : 'text-slate-500 hover:bg-slate-100'}`}>
+                <Download size={12} className="inline mr-1 -mt-0.5" />Export
+              </button>
+              <button onClick={() => { setShowCsvDialog('import'); setCsvImportErrors([]); setCsvImportPreview(null) }} className={`px-4 py-1.5 text-xs font-semibold rounded-lg transition ${showCsvDialog === 'import' ? 'bg-primary/10 text-primary' : 'text-slate-500 hover:bg-slate-100'}`}>
+                <Upload size={12} className="inline mr-1 -mt-0.5" />Import
+              </button>
+            </div>
+
+            <div className="px-6 py-5 space-y-5">
+              {/* Settings row — always visible */}
+              <div className="bg-slate-50 rounded-xl p-4 space-y-3">
+                <div className="flex items-center gap-3 flex-wrap">
+                  <span className="text-[12px] font-semibold text-slate-700 w-20 shrink-0">Delimiter:</span>
+                  <div className="flex gap-1">
+                    {[{ v: ',', label: 'Comma (,)', dec: '.' }, { v: ';', label: 'Semicolon (;)', dec: ',' }].map(o => (
+                      <button key={o.v} onClick={() => { setCsvDelimiter(o.v); setCsvDecimal(o.dec); if (csvRawText && showCsvDialog === 'import') revalidateCsv(csvRawText, o.v, o.dec) }} className={`px-3 py-1 text-[11px] rounded-lg font-medium transition ${csvDelimiter === o.v ? 'bg-emerald-100 text-emerald-700 border border-emerald-300' : 'text-slate-500 border border-slate-200 hover:bg-slate-50'}`}>
+                        {o.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="flex items-center gap-3 flex-wrap">
+                  <span className="text-[12px] font-semibold text-slate-700 w-20 shrink-0">Decimal:</span>
+                  <div className="flex gap-1">
+                    {[{ v: '.', label: 'Point (.)' }, { v: ',', label: 'Comma (,)' }].map(o => (
+                      <button key={o.v} onClick={() => { setCsvDecimal(o.v); if (csvRawText && showCsvDialog === 'import') revalidateCsv(csvRawText, csvDelimiter, o.v) }} className={`px-3 py-1 text-[11px] rounded-lg font-medium transition ${csvDecimal === o.v ? 'bg-emerald-100 text-emerald-700 border border-emerald-300' : 'text-slate-500 border border-slate-200 hover:bg-slate-50'}`} disabled={csvDelimiter === ','  && o.v === ','}>
+                        {o.label}
+                      </button>
+                    ))}
+                  </div>
+                  {csvDelimiter === ',' && csvDecimal === ',' && <span className="text-[10px] text-red-500">Cannot use comma for both delimiter and decimal</span>}
+                </div>
+                {showCsvDialog === 'export' && (
+                  <div className="flex items-center gap-3 flex-wrap">
+                    <span className="text-[12px] font-semibold text-slate-700 w-20 shrink-0">Filename:</span>
+                    <div className="flex-1 flex items-center gap-1">
+                      <input type="text" value={csvFilename} onChange={e => setCsvFilename(e.target.value)} placeholder={csvDefaultFilename()} className="flex-1 px-2.5 py-1 text-[11px] border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-emerald-300 placeholder:text-slate-400" />
+                      <span className="text-[11px] text-slate-400">.csv</span>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* ═══ EXPORT TAB ═══ */}
+              {showCsvDialog === 'export' ? (
+                <>
+                  {/* Primary action area */}
+                  {(!criteria.length || !alternatives.length) ? (
+                    <div className="flex items-center gap-2 text-amber-600 text-sm"><AlertTriangle size={16} /> Add at least one criterion and one alternative before exporting.</div>
+                  ) : (
+                    <div className="flex flex-col items-center gap-3">
+                      <button onClick={() => { exportCSV(); setShowCsvDialog(null) }} className="px-8 py-3 bg-emerald-600 text-white rounded-xl font-semibold text-sm hover:bg-emerald-700 transition shadow-lg shadow-emerald-200 flex items-center gap-2">
+                        <Download size={16} /> Download CSV
+                      </button>
+                      <p className="text-[10px] text-slate-400">{criteria.length} criteria × {alternatives.length} alternatives</p>
+                    </div>
+                  )}
+                  <div className="border-t border-slate-100 pt-3">
+                    <button onClick={() => { downloadCsvTemplate() }} className="px-4 py-1.5 text-[11px] text-slate-500 hover:text-slate-700 border border-dashed border-slate-300 rounded-lg hover:bg-slate-50 transition flex items-center gap-1.5 mx-auto">
+                      <FileSpreadsheet size={13} /> Download Template CSV
+                    </button>
+                    <p className="text-[10px] text-slate-400 text-center mt-1.5">Pre-filled example with sample criteria and scores — edit and re-import</p>
+                  </div>
+
+                  {/* Export notes */}
+                  <div className="bg-amber-50/50 rounded-xl p-4 space-y-2">
+                    <h4 className="text-[13px] font-bold text-amber-800">Export Notes</h4>
+                    <ul className="text-[11px] text-amber-700 space-y-1 list-disc pl-4">
+                      <li>Part worth utilities and the SUM row are included for reference</li>
+                      <li>The file includes a BOM header for correct encoding in Excel</li>
+                      <li>K.O. criteria settings and alternative descriptions are not included in the CSV format</li>
+                    </ul>
+                  </div>
+                </>
+              ) : (
+                <>
+                  {/* ═══ IMPORT TAB ═══ */}
+                  {/* Primary action: Drag & Drop + file select */}
+                  <div
+                    className="border-2 border-dashed border-slate-300 hover:border-primary rounded-xl p-8 text-center transition-colors cursor-pointer"
+                    onDragOver={e => { e.preventDefault(); e.stopPropagation(); e.currentTarget.classList.add('border-primary', 'bg-primary/5'); e.currentTarget.classList.remove('border-slate-300') }}
+                    onDragLeave={e => { e.preventDefault(); e.stopPropagation(); e.currentTarget.classList.remove('border-primary', 'bg-primary/5'); e.currentTarget.classList.add('border-slate-300') }}
+                    onDrop={e => { e.preventDefault(); e.stopPropagation(); e.currentTarget.classList.remove('border-primary', 'bg-primary/5'); e.currentTarget.classList.add('border-slate-300'); const f = e.dataTransfer.files?.[0]; if (f) { setCsvImportFilename(f.name || ''); const r = new FileReader(); r.onload = (ev) => { handleCsvImportText(ev.target.result) }; r.readAsText(f) } }}
+                    onClick={() => csvFileRef.current?.click()}
+                  >
+                    <input ref={csvFileRef} type="file" accept=".csv,.txt" onChange={handleCsvFileSelect} className="hidden" />
+                    <Upload size={28} className="mx-auto mb-2 text-slate-400" />
+                    <p className="text-sm font-semibold text-slate-600">Drop CSV file here</p>
+                    <p className="text-[11px] text-slate-400 mt-1">or click to browse</p>
+                  </div>
+
+                  {/* Validation errors */}
+                  {csvImportErrors.length > 0 && (
+                    <div className="bg-red-50 border border-red-200 rounded-xl p-4 space-y-2">
+                      <h4 className="text-[13px] font-bold text-red-700 flex items-center gap-2"><AlertTriangle size={14} /> Validation Errors ({csvImportErrors.length})</h4>
+                      <ul className="text-[11px] text-red-600 space-y-1 list-disc pl-4 max-h-40 overflow-y-auto">
+                        {csvImportErrors.map((err, i) => <li key={i}>{err}</li>)}
+                      </ul>
+                      <p className="text-[10px] text-red-500">Please fix these errors in your CSV file and try again.</p>
+                    </div>
+                  )}
+
+                  {/* Import preview */}
+                  {csvImportPreview && (
+                    <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-4 space-y-3">
+                      <h4 className="text-[13px] font-bold text-emerald-700 flex items-center gap-2"><CheckCircle size={14} /> Validation Passed</h4>
+                      <div className="grid grid-cols-3 gap-3 text-center">
+                        <div className="bg-white rounded-lg p-2 border border-emerald-100">
+                          <div className="text-lg font-bold text-emerald-700">{csvImportPreview.critCount}</div>
+                          <div className="text-[10px] text-emerald-600">Criteria</div>
+                        </div>
+                        <div className="bg-white rounded-lg p-2 border border-emerald-100">
+                          <div className="text-lg font-bold text-emerald-700">{csvImportPreview.altCount}</div>
+                          <div className="text-[10px] text-emerald-600">Alternatives</div>
+                        </div>
+                        <div className="bg-white rounded-lg p-2 border border-emerald-100">
+                          <div className="text-lg font-bold text-emerald-700">{csvImportPreview.hasPW ? 'Yes' : 'No'}</div>
+                          <div className="text-[10px] text-emerald-600">Has Part Worths</div>
+                        </div>
+                      </div>
+                      {csvImportPreview.hasPW && (
+                        <p className="text-[10px] text-emerald-600 italic">Part worth columns detected but will be recalculated from weights and scores.</p>
+                      )}
+                      <div className="text-center pt-1">
+                        <button onClick={applyCsvImport} className="px-6 py-2.5 bg-emerald-600 text-white rounded-xl font-semibold text-sm hover:bg-emerald-700 transition shadow-lg shadow-emerald-200 flex items-center gap-2 mx-auto">
+                          <CheckCircle size={16} /> Import {csvImportPreview.critCount} Criteria & {csvImportPreview.altCount} Alternatives
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Template download */}
+                  <div className="border-t border-slate-100 pt-3">
+                    <button onClick={() => { downloadCsvTemplate() }} className="px-4 py-1.5 text-[11px] text-slate-500 hover:text-slate-700 border border-dashed border-slate-300 rounded-lg hover:bg-slate-50 transition flex items-center gap-1.5 mx-auto">
+                      <FileSpreadsheet size={13} /> Download Template CSV
+                    </button>
+                    <p className="text-[10px] text-slate-400 text-center mt-1.5">Pre-filled example — edit and re-import</p>
+                  </div>
+
+                  {/* Import requirements */}
+                  <div className="bg-amber-50/50 rounded-xl p-4 space-y-2">
+                    <h4 className="text-[13px] font-bold text-amber-800">Import Requirements</h4>
+                    <ul className="text-[11px] text-amber-700 space-y-1 list-disc pl-4">
+                      <li><strong>Required columns:</strong> Criterion, Direction, Weight, and at least one <code>[Score]</code> column</li>
+                      <li><strong>Optional:</strong> <code>[Part Worth]</code> columns are ignored on import — they are recalculated automatically</li>
+                      <li>The SUM row (if present) is skipped during import</li>
+                      <li>Importing will <strong>replace</strong> all current criteria, alternatives, and scores</li>
+                      <li>K.O. settings and alternative descriptions must be configured manually after import</li>
+                    </ul>
+                  </div>
+                </>
+              )}
+
+              {/* ═══ REFERENCE (both tabs) ═══ */}
+              {/* Column reference */}
+              <div className="bg-slate-50 rounded-xl p-4 space-y-3">
+                <h4 className="text-[13px] font-bold text-slate-700">CSV Column Reference</h4>
+                <div className="grid grid-cols-1 gap-2 text-[11px]">
+                  <div className="flex gap-2"><span className="font-mono bg-white px-1.5 py-0.5 rounded text-slate-600 border border-slate-200 shrink-0">Criterion</span><span className="text-slate-500">Name of each evaluation criterion (one per row)</span></div>
+                  <div className="flex gap-2"><span className="font-mono bg-white px-1.5 py-0.5 rounded text-slate-600 border border-slate-200 shrink-0">Direction</span><span className="text-slate-500">"maximize" or "minimize" — whether higher or lower values are preferred</span></div>
+                  <div className="flex gap-2"><span className="font-mono bg-white px-1.5 py-0.5 rounded text-slate-600 border border-slate-200 shrink-0">Weight (abs)</span><span className="text-slate-500">Absolute weight (e.g. 20, 35) — auto-normalized to 100%</span></div>
+                  <div className="flex gap-2"><span className="font-mono bg-white px-1.5 py-0.5 rounded text-slate-600 border border-slate-200 shrink-0">Weight (rel)</span><span className="text-slate-500">Relative weight (0–1, e.g. 0.20) — optional, auto-calculated in export. On import: values ≤ 1 are scaled ×100</span></div>
+                  <div className="flex gap-2"><span className="font-mono bg-white px-1.5 py-0.5 rounded text-slate-600 border border-slate-200 shrink-0">&lt;Alt&gt; [Score]</span><span className="text-slate-500">Raw score for each alternative on this criterion (one column per alternative)</span></div>
+                  <div className="flex gap-2"><span className="font-mono bg-white px-1.5 py-0.5 rounded text-slate-600 border border-slate-200 shrink-0">&lt;Alt&gt; [Part Worth]</span><span className="text-slate-500">Weighted normalized utility per criterion (auto-calculated on import if omitted)</span></div>
+                </div>
+              </div>
+
+              {/* Structure */}
+              <div className="bg-blue-50/50 rounded-xl p-4 space-y-2">
+                <h4 className="text-[13px] font-bold text-blue-800">Structure</h4>
+                <ul className="text-[11px] text-blue-700 space-y-1 list-disc pl-4">
+                  <li><strong>Rows</strong> = criteria (one criterion per row), plus a final SUM row</li>
+                  <li><strong>Columns</strong> = alternatives appear twice — first as <code>[Score]</code>, then as <code>[Part Worth]</code></li>
+                  <li>The <strong>SUM row</strong> shows total weight and total utility per alternative</li>
+                  <li>Separator is <code>{csvDelimiter === ',' ? 'comma (,)' : 'semicolon (;)'}</code> — select above. Fields containing the delimiter are quoted.</li>
+                </ul>
+              </div>
+
+              {/* Example CSV snippet */}
+              <div className="bg-slate-50 rounded-xl p-4 space-y-2">
+                <h4 className="text-[13px] font-bold text-slate-700">Example CSV</h4>
+                <pre className="text-[10px] text-slate-600 bg-white rounded-lg p-3 border border-slate-200 overflow-x-auto font-mono leading-relaxed whitespace-pre">{[
+                  ['Criterion','Direction','Weight (abs)','Weight (rel)','Apt A [Score]','Apt B [Score]','Apt A [Part Worth]','Apt B [Part Worth]'].join(csvDelimiter),
+                  ['Monthly Rent','minimize','30', csvDecimal === ',' ? '0,6' : '0.6','1800','2100', csvDecimal === ',' ? '0,1364' : '0.1364', csvDecimal === ',' ? '0,0000' : '0.0000'].join(csvDelimiter),
+                  ['Size (m²)','maximize','20', csvDecimal === ',' ? '0,4' : '0.4','72','85', csvDecimal === ',' ? '0,0000' : '0.0000', csvDecimal === ',' ? '0,1818' : '0.1818'].join(csvDelimiter),
+                  ['SUM','','50','1','','', csvDecimal === ',' ? '0,1364' : '0.1364', csvDecimal === ',' ? '0,1818' : '0.1818'].join(csvDelimiter),
+                ].join('\n')}</pre>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ═══ About This Tool Modal ═══ */}
       {showAbout && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={() => setShowAbout(false)}>
@@ -2363,7 +2815,7 @@ export default function App() {
                     { icon: '🎓', title: 'Academically Grounded', desc: 'Based on the doctoral research of Dr. Sven-Erik Willrich at the Karlsruhe Institute of Technology (KIT), integrating state-of-the-art MCDA methodology with practical usability.' },
                     { icon: '⚖️', title: '4 Weight Elicitation Methods', desc: 'Direct Rating, Likert Scale, full AHP (Analytic Hierarchy Process), and PC Simplified — a method empirically validated by Dr. Willrich with over 150 participants.' },
                     { icon: '🔬', title: '4-Dimensional Sensitivity Analysis', desc: 'Single-criterion sweeps, exhaustive dual-criteria grid analysis, full n-dimensional combinatorial sweeps, and Monte Carlo simulation with Dirichlet-uniform sampling.' },
-                    { icon: '⚡', title: 'Real-Time Computation', desc: 'Live weight updates, min-max normalization with directional scoring (maximize/minimize), and instant part-worth decomposition.' },
+                    { icon: '⚡', title: 'Real-Time Computation', desc: 'Live weight updates, column-sum normalization with reciprocal inversion for minimize criteria, and instant part-worth decomposition. All utilities sum to 1.0.' },
                   ].map((f, i) => (
                     <div key={i} className="bg-slate-50 rounded-xl p-3 border border-slate-100">
                       <div className="flex items-start gap-2.5">
@@ -2404,8 +2856,8 @@ export default function App() {
                   <Target size={14} className="text-secondary" /> Best Practices Integrated
                 </h4>
                 <ul className="space-y-1.5 text-xs text-slate-600">
-                  <li className="flex items-start gap-2"><span className="text-emerald-500 font-bold mt-px">✓</span> <span><strong>Min-max normalization</strong> for commensurable utility scores across heterogeneous criteria</span></li>
-                  <li className="flex items-start gap-2"><span className="text-emerald-500 font-bold mt-px">✓</span> <span><strong>Directional scoring</strong> — automatic handling of maximize vs. minimize criteria</span></li>
+                  <li className="flex items-start gap-2"><span className="text-emerald-500 font-bold mt-px">✓</span> <span><strong>Column-sum normalization</strong> — maximize: x/Σx, minimize: reciprocal (1/x) then normalize. Utilities sum to 1.0</span></li>
+                  <li className="flex items-start gap-2"><span className="text-emerald-500 font-bold mt-px">✓</span> <span><strong>Directional scoring</strong> — automatic handling of maximize vs. minimize criteria via reciprocal inversion</span></li>
                   <li className="flex items-start gap-2"><span className="text-emerald-500 font-bold mt-px">✓</span> <span><strong>AHP eigenvector method</strong> for deriving consistent weights from pairwise comparisons (Saaty, 1980)</span></li>
                   <li className="flex items-start gap-2"><span className="text-emerald-500 font-bold mt-px">✓</span> <span><strong>PC Simplified</strong> with n-1 adjacent comparisons for guaranteed consistency (Koczkodaj & Szybowski, 2015; Willrich, 2021)</span></li>
                   <li className="flex items-start gap-2"><span className="text-emerald-500 font-bold mt-px">✓</span> <span><strong>Dirichlet-uniform sampling</strong> for unbiased Monte Carlo weight space exploration</span></li>
